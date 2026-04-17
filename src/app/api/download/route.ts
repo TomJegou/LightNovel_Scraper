@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const safeName = book.bookId.replace(/[^a-z0-9_-]/gi, "_");
+  const safeName = book.slug;
   return new Response(webStream, {
     status: 200,
     headers: {

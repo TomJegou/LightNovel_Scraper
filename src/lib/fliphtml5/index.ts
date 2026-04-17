@@ -16,9 +16,62 @@ export type FlipPage = {
 export type FlipBook = {
   baseUrl: string;
   bookId: string;
+  title: string | null;
+  slug: string;
   totalPageCount: number;
   pages: FlipPage[];
 };
+
+/**
+ * Convert a human title into a filesystem-safe kebab-case slug.
+ * Falls back to the provided fallback (bookId) if the title yields nothing.
+ */
+export function slugify(title: string | null | undefined, fallback: string): string {
+  const source = (title ?? "").normalize("NFKD");
+  const cleaned = source
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  if (cleaned.length > 0) return cleaned;
+  return fallback.replace(/[^a-z0-9_-]/gi, "_");
+}
+
+const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
+}
+
+async function fetchBookTitle(baseUrl: string): Promise<string | null> {
+  try {
+    const { response, body } = await boundedFetch(baseUrl, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      },
+      cache: "no-store",
+      maxBytes: LIMITS.configMaxBytes,
+    });
+    if (!response.ok) return null;
+    const html = new TextDecoder("utf-8").decode(body);
+    const m = html.match(TITLE_RE);
+    if (!m) return null;
+    const raw = decodeHtmlEntities(m[1]).replace(/\s+/g, " ").trim();
+    return raw.length > 0 ? raw.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
 
 type RawPage = {
   n?: string[];
@@ -83,14 +136,19 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     throw new Error("Resolved config URL is not on the allowlist");
   }
 
-  const { response: res, body } = await boundedFetch(configUrl, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-    },
-    cache: "no-store",
-    maxBytes: LIMITS.configMaxBytes,
-  });
+  const [configResult, title] = await Promise.all([
+    boundedFetch(configUrl, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      },
+      cache: "no-store",
+      maxBytes: LIMITS.configMaxBytes,
+    }),
+    fetchBookTitle(baseUrl),
+  ]);
+
+  const { response: res, body } = configResult;
   if (!res.ok) {
     throw new Error(`Failed to fetch config.js: HTTP ${res.status}`);
   }
@@ -156,5 +214,7 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     };
   });
 
-  return { baseUrl, bookId, totalPageCount, pages };
+  const slug = slugify(title, bookId);
+
+  return { baseUrl, bookId, title, slug, totalPageCount, pages };
 }

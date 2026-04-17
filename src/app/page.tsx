@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type FlipPage = {
   index: number;
@@ -12,18 +12,35 @@ type FlipPage = {
 type FlipBook = {
   baseUrl: string;
   bookId: string;
+  title: string | null;
+  slug: string;
   totalPageCount: number;
   pages: FlipPage[];
 };
+
+const APP_NAME = "FlipHTML5 Scraper";
+const DEFAULT_URL = "https://online.fliphtml5.com/eogmc/laiw/";
 
 function proxied(url: string) {
   return `/api/image?u=${encodeURIComponent(url)}`;
 }
 
+function readInitialUrl(): string {
+  if (typeof window === "undefined") return DEFAULT_URL;
+  const fromQuery = new URL(window.location.href).searchParams.get("url");
+  return fromQuery ?? DEFAULT_URL;
+}
+
+function readHashPage(): number | null {
+  if (typeof window === "undefined") return null;
+  const m = window.location.hash.match(/(?:^|[#&?])p=(\d+)/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export default function Home() {
-  const [url, setUrl] = useState(
-    "https://online.fliphtml5.com/eogmc/laiw/?1776439280#p=1",
-  );
+  const [url, setUrl] = useState<string>(DEFAULT_URL);
   const [book, setBook] = useState<FlipBook | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "downloading">(
     "idle",
@@ -32,29 +49,89 @@ export default function Home() {
   const [useThumbs, setUseThumbs] = useState(true);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
-  const handleScan = useCallback(async () => {
-    setStatus("loading");
-    setError(null);
-    setBook(null);
-    try {
-      const res = await fetch("/api/pages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      const payload = (await res.json()) as FlipBook | { error: string };
-      if (!res.ok) {
-        throw new Error(
-          "error" in payload ? payload.error : `HTTP ${res.status}`,
-        );
+  const hasAutoScannedRef = useRef(false);
+  const pendingHashPageRef = useRef<number | null>(null);
+  const syncingFromUrlRef = useRef(false);
+  const prevHashRef = useRef<string>("");
+  const syncEnabledRef = useRef(false);
+
+  const handleScan = useCallback(
+    async (targetUrl?: string) => {
+      const effective = (targetUrl ?? url).trim();
+      if (!effective) return;
+      syncEnabledRef.current = true;
+      setStatus("loading");
+      setError(null);
+      setBook(null);
+      try {
+        const res = await fetch("/api/pages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ url: effective }),
+        });
+        const payload = (await res.json()) as FlipBook | { error: string };
+        if (!res.ok) {
+          throw new Error(
+            "error" in payload ? payload.error : `HTTP ${res.status}`,
+          );
+        }
+        setBook(payload as FlipBook);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setStatus("idle");
       }
-      setBook(payload as FlipBook);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setStatus("idle");
+    },
+    [url],
+  );
+
+  useEffect(() => {
+    const initialUrl = readInitialUrl();
+    setUrl(initialUrl);
+    pendingHashPageRef.current = readHashPage();
+    prevHashRef.current = window.location.hash;
+
+    if (
+      !hasAutoScannedRef.current &&
+      new URL(window.location.href).searchParams.has("url")
+    ) {
+      hasAutoScannedRef.current = true;
+      void handleScan(initialUrl);
     }
-  }, [url]);
+  }, [handleScan]);
+
+  useEffect(() => {
+    if (!book) return;
+    const pending = pendingHashPageRef.current;
+    if (pending !== null) {
+      pendingHashPageRef.current = null;
+      const clamped = Math.min(Math.max(1, pending), book.pages.length);
+      setViewerIndex(clamped - 1);
+    }
+  }, [book]);
+
+  useEffect(() => {
+    if (!book) return;
+    const onPopState = () => {
+      syncingFromUrlRef.current = true;
+      const hashPage = readHashPage();
+      if (hashPage === null) {
+        setViewerIndex(null);
+      } else {
+        const clamped = Math.min(Math.max(1, hashPage), book.pages.length);
+        setViewerIndex(clamped - 1);
+      }
+      queueMicrotask(() => {
+        syncingFromUrlRef.current = false;
+      });
+    };
+    window.addEventListener("popstate", onPopState);
+    window.addEventListener("hashchange", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("hashchange", onPopState);
+    };
+  }, [book]);
 
   const handleDownload = useCallback(async () => {
     if (!book) return;
@@ -76,7 +153,7 @@ export default function Home() {
       const href = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
-      a.download = `${book.bookId.replace(/[^a-z0-9_-]/gi, "_")}.zip`;
+      a.download = `${book.slug}.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -90,9 +167,15 @@ export default function Home() {
 
   const headline = useMemo(() => {
     if (!book) return null;
+    const displayTitle = book.title ?? book.bookId;
     return (
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h2 className="text-xl font-semibold text-zinc-100">{book.bookId}</h2>
+        <h2 className="text-xl font-semibold text-zinc-100">{displayTitle}</h2>
+        {book.title && (
+          <span className="font-mono text-xs text-zinc-500">
+            {book.bookId}
+          </span>
+        )}
         <span className="text-sm text-zinc-400">
           {book.totalPageCount} pages
         </span>
@@ -142,6 +225,62 @@ export default function Home() {
   const hasNext =
     !!book && viewerIndex !== null && viewerIndex < book.pages.length - 1;
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (book && currentPage) {
+      const base = book.title ?? book.bookId;
+      document.title = `${base} · p. ${Number(currentPage.pageNumber)} / ${book.pages.length}`;
+    } else if (book) {
+      document.title = `${book.title ?? book.bookId} · ${APP_NAME}`;
+    } else {
+      document.title = APP_NAME;
+    }
+  }, [book, currentPage]);
+
+  // Sync the URL from app state: ?url=<book> and #p=<n>.
+  // - `?url=` uses replaceState (typing in the input should not spam history).
+  // - Opening the viewer (hash goes from empty to #p=N) uses pushState so the
+  //   browser back button can close it.
+  // - Navigating inside the viewer uses replaceState to avoid flooding history.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!syncEnabledRef.current) return;
+    if (syncingFromUrlRef.current) return;
+    // While we still have a pending hash page to consume (deep link on load),
+    // don't touch the URL — we'd overwrite the user's #p=N before the viewer
+    // has had a chance to open.
+    if (pendingHashPageRef.current !== null) return;
+
+    const current = new URL(window.location.href);
+
+    if (book) {
+      current.searchParams.set("url", url);
+    } else {
+      current.searchParams.delete("url");
+    }
+
+    const desiredHash =
+      book && currentPage ? `#p=${Number(currentPage.pageNumber)}` : "";
+    current.hash = desiredHash;
+
+    const nextHref = current.toString();
+    if (nextHref === window.location.href) return;
+
+    // Opening the viewer = hash transitions from "" to "#p=N". In that case
+    // push a new history entry so the browser back button closes the viewer.
+    // Any other transition (navigating pages, closing, URL edits) replaces
+    // the current entry to keep history clean.
+    const prevHash = prevHashRef.current;
+    const opened = desiredHash !== "" && prevHash === "";
+    prevHashRef.current = desiredHash;
+
+    if (opened) {
+      window.history.pushState(null, "", nextHref);
+    } else {
+      window.history.replaceState(null, "", nextHref);
+    }
+  }, [book, currentPage, url]);
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
       <header className="border-b border-zinc-800/80 bg-zinc-900/60 backdrop-blur sticky top-0 z-10">
@@ -174,7 +313,7 @@ export default function Home() {
               spellCheck={false}
             />
             <button
-              onClick={handleScan}
+              onClick={() => handleScan()}
               disabled={status !== "idle" || !url.trim()}
               className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
