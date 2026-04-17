@@ -22,8 +22,6 @@ type ResolveResponse = {
   lastPage: number;
 };
 
-const DEFAULT_URL = "https://online.fliphtml5.com/eogmc/laiw/";
-
 function formatRelative(ms: number): string {
   const diff = Date.now() - ms;
   if (diff < 60_000) return "just now";
@@ -62,7 +60,7 @@ function HomeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const [url, setUrl] = useState<string>(DEFAULT_URL);
+  const [url, setUrl] = useState<string>("");
   const [resolving, setResolving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
