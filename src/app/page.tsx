@@ -16,10 +16,40 @@ type FlipBook = {
   slug: string;
   totalPageCount: number;
   pages: FlipPage[];
+  libraryId: number | null;
+  lastPage: number;
+};
+
+type LibraryEntry = {
+  id: number;
+  baseUrl: string;
+  bookId: string;
+  title: string | null;
+  slug: string;
+  totalPages: number;
+  lastPage: number;
+  firstSeenAt: number;
+  lastReadAt: number;
 };
 
 const APP_NAME = "FlipHTML5 Scraper";
 const DEFAULT_URL = "https://online.fliphtml5.com/eogmc/laiw/";
+const PROGRESS_DEBOUNCE_MS = 1500;
+
+function formatRelative(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  const mins = Math.round(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  const years = Math.round(months / 12);
+  return `${years}y ago`;
+}
 
 function proxied(url: string) {
   return `/api/image?u=${encodeURIComponent(url)}`;
@@ -49,20 +79,35 @@ export default function Home() {
   const [useThumbs, setUseThumbs] = useState(true);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
+  const [library, setLibrary] = useState<LibraryEntry[]>([]);
+
   const hasAutoScannedRef = useRef(false);
   const pendingHashPageRef = useRef<number | null>(null);
   const syncingFromUrlRef = useRef(false);
   const prevHashRef = useRef<string>("");
   const syncEnabledRef = useRef(false);
+  const lastSentPageRef = useRef<number | null>(null);
+
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const res = await fetch("/api/library", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { entries: LibraryEntry[] };
+      setLibrary(data.entries);
+    } catch {
+      // Non-fatal: library is a "nice to have" overlay on the home page.
+    }
+  }, []);
 
   const handleScan = useCallback(
-    async (targetUrl?: string) => {
+    async (targetUrl?: string, resumePage?: number) => {
       const effective = (targetUrl ?? url).trim();
       if (!effective) return;
       syncEnabledRef.current = true;
       setStatus("loading");
       setError(null);
       setBook(null);
+      lastSentPageRef.current = null;
       try {
         const res = await fetch("/api/pages", {
           method: "POST",
@@ -75,14 +120,46 @@ export default function Home() {
             "error" in payload ? payload.error : `HTTP ${res.status}`,
           );
         }
-        setBook(payload as FlipBook);
+        const fb = payload as FlipBook;
+        // If the caller asked to resume at a specific page (library card
+        // click), feed it through the existing hash-page pipeline so the
+        // viewer opens on that page. Otherwise only trust the URL hash.
+        if (resumePage && resumePage > 0) {
+          pendingHashPageRef.current = resumePage;
+        }
+        setBook(fb);
+        void refreshLibrary();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
         setStatus("idle");
       }
     },
-    [url],
+    [url, refreshLibrary],
+  );
+
+  const handleOpenFromLibrary = useCallback(
+    (entry: LibraryEntry) => {
+      setUrl(entry.baseUrl);
+      void handleScan(entry.baseUrl, entry.lastPage);
+    },
+    [handleScan],
+  );
+
+  const handleDeleteFromLibrary = useCallback(
+    async (id: number) => {
+      setLibrary((prev) => prev.filter((e) => e.id !== id));
+      try {
+        const res = await fetch(`/api/library/${id}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          // Revert on unexpected failure.
+          void refreshLibrary();
+        }
+      } catch {
+        void refreshLibrary();
+      }
+    },
+    [refreshLibrary],
   );
 
   useEffect(() => {
@@ -91,6 +168,8 @@ export default function Home() {
     pendingHashPageRef.current = readHashPage();
     prevHashRef.current = window.location.hash;
 
+    void refreshLibrary();
+
     if (
       !hasAutoScannedRef.current &&
       new URL(window.location.href).searchParams.has("url")
@@ -98,7 +177,7 @@ export default function Home() {
       hasAutoScannedRef.current = true;
       void handleScan(initialUrl);
     }
-  }, [handleScan]);
+  }, [handleScan, refreshLibrary]);
 
   useEffect(() => {
     if (!book) return;
@@ -235,6 +314,29 @@ export default function Home() {
     } else {
       document.title = APP_NAME;
     }
+  }, [book, currentPage]);
+
+  // Debounced PATCH of last_page to the library whenever the reader advances.
+  // Skips when the viewer is closed so we don't thrash the DB on close.
+  useEffect(() => {
+    if (!book || !book.libraryId || !currentPage) return;
+    const libId = book.libraryId;
+    const page = Number(currentPage.pageNumber);
+    if (!Number.isFinite(page) || page < 1) return;
+    if (lastSentPageRef.current === page) return;
+
+    const handle = window.setTimeout(() => {
+      lastSentPageRef.current = page;
+      void fetch(`/api/library/${libId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lastPage: page }),
+      }).catch(() => {
+        // Progress saving is best-effort; ignore transient failures.
+      });
+    }, PROGRESS_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(handle);
   }, [book, currentPage]);
 
   // Sync the URL from app state: ?url=<book> and #p=<n>.
@@ -382,6 +484,85 @@ export default function Home() {
                   </span>
                 </button>
               ))}
+            </div>
+          </section>
+        )}
+
+        {!book && status === "idle" && library.length > 0 && (
+          <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 space-y-4">
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 className="text-lg font-semibold text-zinc-100">Library</h2>
+              <span className="text-xs text-zinc-500">
+                {library.length} book{library.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {library.map((entry) => {
+                const displayTitle = entry.title ?? entry.bookId;
+                const progressPct = Math.round(
+                  (entry.lastPage / Math.max(1, entry.totalPages)) * 100,
+                );
+                return (
+                  <div
+                    key={entry.id}
+                    className="group relative rounded-lg border border-zinc-800 bg-zinc-950 p-4 transition hover:border-sky-500/60"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleOpenFromLibrary(entry)}
+                      className="block w-full text-left focus:outline-none"
+                      aria-label={`Resume ${displayTitle} at page ${entry.lastPage}`}
+                    >
+                      <h3 className="line-clamp-2 text-sm font-semibold text-zinc-100 group-hover:text-sky-300">
+                        {displayTitle}
+                      </h3>
+                      {entry.title && (
+                        <p className="mt-0.5 font-mono text-[10px] text-zinc-500">
+                          {entry.bookId}
+                        </p>
+                      )}
+                      <p className="mt-2 text-xs text-zinc-400">
+                        Resume p.{" "}
+                        <span className="text-zinc-200">{entry.lastPage}</span>{" "}
+                        / {entry.totalPages}
+                      </p>
+                      <div className="mt-2 h-1 w-full overflow-hidden rounded bg-zinc-800">
+                        <div
+                          className="h-full bg-sky-500"
+                          style={{ width: `${progressPct}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-[11px] text-zinc-500">
+                        Last opened {formatRelative(entry.lastReadAt)}
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDeleteFromLibrary(entry.id);
+                      }}
+                      className="absolute right-2 top-2 rounded-md p-1 text-zinc-500 opacity-0 transition hover:bg-white/10 hover:text-red-300 focus:opacity-100 group-hover:opacity-100"
+                      aria-label={`Remove ${displayTitle} from library`}
+                      title="Remove from library"
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </section>
         )}

@@ -34,3 +34,6 @@ README.md
 !AGENTS.md
 
 scripts
+
+# Local SQLite data (dev) - must never be baked into the image.
+data

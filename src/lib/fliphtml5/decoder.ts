@@ -1,7 +1,23 @@
 import fs from "node:fs";
 import vm from "node:vm";
 import path from "node:path";
-import { createRequire } from "node:module";
+
+// `createRequire` must be obtained via a dynamic import to avoid webpack's
+// static analysis ("module.createRequire failed parsing argument" warning)
+// which otherwise produces a non-functional `require` in the runtime bundle.
+// Depending on how webpack rewrites the `node:module` import, the factory
+// may live on the namespace root or on `.default` (ESM/CJS interop).
+async function nodeCreateRequire(from: string): Promise<NodeRequire> {
+  const mod = (await import("node:module")) as unknown as {
+    createRequire?: (from: string) => NodeRequire;
+    default?: { createRequire: (from: string) => NodeRequire };
+  };
+  const factory = mod.createRequire ?? mod.default?.createRequire;
+  if (typeof factory !== "function") {
+    throw new Error("node:module.createRequire is not available");
+  }
+  return factory(from);
+}
 
 type DeModule = {
   wasmBinary: Buffer;
@@ -35,7 +51,7 @@ function loadDecoder(): Promise<Sandbox> {
     const b64 = match[1].replace("data:application/octet-stream;base64,", "");
     const wasmBinary = Buffer.from(b64, "base64");
 
-    const requireFn = createRequire(scriptPath);
+    const requireFn = await nodeCreateRequire(scriptPath);
 
     const sandbox: Record<string, unknown> = {
       console,

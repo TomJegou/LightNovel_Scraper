@@ -11,11 +11,14 @@ services:
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
       NEXT_TELEMETRY_DISABLED: "1"
+      LIBRARY_DB_PATH: /data/library.db
     ports:
       - "46460:3000"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - lightnovel-data:/data
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -26,3 +29,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  lightnovel-data: {}

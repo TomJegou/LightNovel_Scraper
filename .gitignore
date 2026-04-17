@@ -46,3 +46,9 @@ next-env.d.ts
 config.js.raw*
 config-print.txt
 pages.json
+
+# local SQLite data (dev)
+/data/
+*.db
+*.db-wal
+*.db-shm

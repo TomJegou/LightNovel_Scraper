@@ -16,8 +16,13 @@ renders them in a clean, keyboard-navigable viewer.
 - Paste a FlipHTML5 book URL and list every page (high-resolution `.webp`).
 - Built-in image proxy to bypass hotlink protection and CORS.
 - Full-screen viewer with keyboard shortcuts (`←`, `→`, `Space`, `Esc`).
-- One-click download of the whole book as a `<bookId>.zip` with pages
+- One-click download of the whole book as a `<slug>.zip` with pages
   numbered `0001.webp`, `0002.webp`, ...
+- **Library & resume**: every scanned book is persisted in a small SQLite
+  database; the home page shows a library grid and clicking a card resumes
+  reading at the last page you viewed.
+- Deep-linkable reader (`?url=<book>#p=<N>`) so bookmarks preserve the
+  current page.
 - Fully server-side scraping, including WebAssembly-based config
   decryption (FlipHTML5 obfuscates image lists in `config.js`).
 - Hardened for self-hosting: SSRF allowlist, request size/time limits,
@@ -101,6 +106,36 @@ and an HTTP healthcheck. The container runs as the non-root `nextjs` user
 > exposed on the host. If you change the container's internal port, keep
 > the healthcheck URL in `docker-compose.yml` in sync.
 
+### Data persistence
+
+The library/history is stored in a small SQLite database. In Docker the
+container writes it to `/data/library.db`, which is mounted from the named
+volume `lightnovel-data`. Everything else on the container runs on a
+read-only root filesystem, so only this volume is writable.
+
+- **Override the path** (dev or custom deployments):
+  `LIBRARY_DB_PATH=/absolute/path/to/library.db`. Outside of Docker the
+  default is `./data/library.db` relative to the working directory.
+- **Backup** the database from a running container:
+  ```bash
+  docker cp lightnovel-scraper:/data/library.db ./library.db
+  ```
+- **Restore** a backup (container must be stopped first):
+  ```bash
+  docker compose cp ./library.db web:/data/library.db
+  docker compose restart web
+  ```
+- **Reset** the entire library:
+  ```bash
+  docker compose down
+  docker volume rm lightnovel_lightnovel-data
+  docker compose up -d
+  ```
+
+There is no authentication; anyone who can reach the app can see and
+modify the library. Keep the container behind a reverse proxy with auth
+if you expose it publicly.
+
 ## API
 
 All API routes run on the Node.js runtime (`export const runtime = "nodejs"`).
@@ -119,6 +154,8 @@ Response:
 {
   "baseUrl": "https://online.fliphtml5.com/<owner>/<book>/",
   "bookId": "<owner>/<book>",
+  "title": "Book Title",
+  "slug": "book-title",
   "totalPageCount": 261,
   "pages": [
     {
@@ -127,9 +164,15 @@ Response:
       "largeUrl": "https://online.fliphtml5.com/.../large/<hash>.webp",
       "thumbUrl": "https://online.fliphtml5.com/.../thumb/<hash>.webp"
     }
-  ]
+  ],
+  "libraryId": 1,
+  "lastPage": 1
 }
 ```
+
+The call also upserts the book into the server-side library so it shows
+up on the home page. `libraryId` + `lastPage` are returned so the UI can
+resume at the last-read page and later `PATCH` its progress.
 
 Rate limit: **20 req/min/IP**.
 
@@ -144,11 +187,52 @@ Rate limit: **600 req/min/IP**.
 
 ### `POST /api/download`
 
-Same body as `/api/pages`. Streams a ZIP archive named `<bookId>.zip` that
+Same body as `/api/pages`. Streams a ZIP archive named `<slug>.zip` that
 contains the numbered pages (`0001.webp`, `0002.webp`, ...).
 
 Rate limit: **4 req/min/IP**. Aggregate size is capped to protect the
 server from abuse.
+
+### `GET /api/library`
+
+Returns the list of previously scanned books, sorted by most recent
+access. Capped at 50 entries.
+
+```json
+{
+  "entries": [
+    {
+      "id": 1,
+      "baseUrl": "https://online.fliphtml5.com/<owner>/<book>/",
+      "bookId": "<owner>/<book>",
+      "title": "Book Title",
+      "slug": "book-title",
+      "totalPages": 261,
+      "lastPage": 42,
+      "firstSeenAt": 1734000000000,
+      "lastReadAt": 1734100000000
+    }
+  ]
+}
+```
+
+Rate limit: **120 req/min/IP**.
+
+### `PATCH /api/library/:id`
+
+Updates the `lastPage` cursor for a library entry. Body:
+
+```json
+{ "lastPage": 42 }
+```
+
+Values are clamped to `[1, totalPages]`. Rate limit: **300 req/min/IP**
+(the reader debounces this, so real-world traffic is much lower).
+
+### `DELETE /api/library/:id`
+
+Removes an entry from the library. Returns `204` on success. Rate limit:
+**60 req/min/IP**.
 
 ## Security
 
@@ -178,18 +262,21 @@ at `src/lib/security.ts` and is reused by every route:
 src/
 ├── app/
 │   ├── api/
-│   │   ├── download/route.ts   # ZIP download
-│   │   ├── image/route.ts      # Image proxy
-│   │   └── pages/route.ts      # Metadata endpoint
-│   ├── layout.tsx              # Root layout
-│   ├── page.tsx                # Reader UI
+│   │   ├── download/route.ts          # ZIP download
+│   │   ├── image/route.ts             # Image proxy
+│   │   ├── library/route.ts           # Library listing
+│   │   ├── library/[id]/route.ts      # Library update/delete
+│   │   └── pages/route.ts             # Metadata endpoint (+ upsert)
+│   ├── layout.tsx                     # Root layout
+│   ├── page.tsx                       # Reader UI + library grid
 │   └── globals.css
 └── lib/
-    ├── security.ts             # Allowlist, bounded fetch, rate limit
+    ├── library.ts                     # SQLite persistence (better-sqlite3)
+    ├── security.ts                    # Allowlist, bounded fetch, rate limit
     └── fliphtml5/
-        ├── decoder.ts          # WASM loader (vm sandbox)
-        ├── deString.js         # Upstream Emscripten module (not modified)
-        └── index.ts            # Scraping pipeline
+        ├── decoder.ts                 # WASM loader (vm sandbox)
+        ├── deString.js                # Upstream Emscripten module (not modified)
+        └── index.ts                   # Scraping pipeline
 ```
 
 ## License

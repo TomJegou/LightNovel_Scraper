@@ -39,6 +39,11 @@ COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=build --chown=nextjs:nodejs /app/public ./public
 
+# Writable directory for the SQLite library DB. Mounted as a Docker volume
+# in production so data survives container rebuilds.
+RUN mkdir -p /data && chown nextjs:nodejs /data
+ENV LIBRARY_DB_PATH=/data/library.db
+
 USER nextjs
 EXPOSE 3000
 
