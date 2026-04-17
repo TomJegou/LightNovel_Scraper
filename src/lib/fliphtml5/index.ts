@@ -1,3 +1,9 @@
+import {
+  ALLOWED_UPSTREAM_HOSTS,
+  boundedFetch,
+  isAllowedUpstream,
+  LIMITS,
+} from "@/lib/security";
 import { deString } from "./decoder";
 
 export type FlipPage = {
@@ -35,7 +41,7 @@ export function normalizeBookUrl(input: string): { baseUrl: string; bookId: stri
     throw new Error(`Invalid URL: ${input}`);
   }
 
-  if (!/fliphtml5\.com$/i.test(u.hostname)) {
+  if (u.protocol !== "https:" || !ALLOWED_UPSTREAM_HOSTS.has(u.hostname.toLowerCase())) {
     throw new Error(`Unsupported host: ${u.hostname}`);
   }
 
@@ -46,6 +52,9 @@ export function normalizeBookUrl(input: string): { baseUrl: string; bookId: stri
     );
   }
   const [owner, book] = segments;
+  if (!/^[a-z0-9_-]{1,64}$/i.test(owner) || !/^[a-z0-9_-]{1,64}$/i.test(book)) {
+    throw new Error("URL contains unexpected characters in owner/book segments.");
+  }
   const baseUrl = `${u.protocol}//${u.host}/${owner}/${book}/`;
   return { baseUrl, bookId: `${owner}/${book}` };
 }
@@ -56,7 +65,11 @@ export function normalizeBookUrl(input: string): { baseUrl: string; bookId: stri
  */
 function resolveAsset(rel: string, baseUrl: string): string {
   const clean = rel.replace(/^\.\//, "");
-  return new URL(clean, baseUrl).toString();
+  const resolved = new URL(clean, baseUrl).toString();
+  if (!isAllowedUpstream(resolved)) {
+    throw new Error("Decrypted payload referenced a disallowed host");
+  }
+  return resolved;
 }
 
 /**
@@ -66,17 +79,22 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
   const { baseUrl, bookId } = normalizeBookUrl(inputUrl);
 
   const configUrl = new URL("javascript/config.js", baseUrl).toString();
-  const res = await fetch(configUrl, {
+  if (!isAllowedUpstream(configUrl)) {
+    throw new Error("Resolved config URL is not on the allowlist");
+  }
+
+  const { response: res, body } = await boundedFetch(configUrl, {
     headers: {
       "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     },
     cache: "no-store",
+    maxBytes: LIMITS.configMaxBytes,
   });
   if (!res.ok) {
     throw new Error(`Failed to fetch config.js: HTTP ${res.status}`);
   }
-  const configSrc = await res.text();
+  const configSrc = new TextDecoder("utf-8").decode(body);
 
   const bookConfigMatch = configSrc.match(/"bookConfig":"([^"]+)"/);
   const pagesMatch = configSrc.match(/"fliphtml5_pages":"([^"]+)"/);
@@ -110,6 +128,15 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     rawPages = JSON.parse(decodedPages.slice(0, arrEnd + 1)) as RawPage[];
   } catch (e) {
     throw new Error(`Failed to parse page array: ${(e as Error).message}`);
+  }
+
+  if (rawPages.length === 0) {
+    throw new Error("No pages found for this book");
+  }
+  if (rawPages.length > LIMITS.maxPages) {
+    throw new Error(
+      `Book has ${rawPages.length} pages, which exceeds the ${LIMITS.maxPages} page limit`,
+    );
   }
 
   if (!totalPageCount) totalPageCount = rawPages.length;
