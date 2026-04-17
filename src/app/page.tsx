@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 
 type LibraryEntry = {
   id: number;
@@ -49,16 +49,7 @@ function errorMessageFromCode(code: string | null): string | null {
 }
 
 export default function Home() {
-  return (
-    <Suspense fallback={null}>
-      <HomeContent />
-    </Suspense>
-  );
-}
-
-function HomeContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
 
   const [url, setUrl] = useState<string>("");
   const [resolving, setResolving] = useState(false);
@@ -66,11 +57,16 @@ function HomeContent() {
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
 
+  // Read `?error=<code>` once on mount from window.location to surface
+  // messages set by the reader on redirect (unknown id, slug mismatch…).
+  // Done via window rather than useSearchParams to avoid forcing the
+  // whole tree into a Suspense boundary just for a static banner.
   useEffect(() => {
-    const code = searchParams?.get("error") ?? null;
+    if (typeof window === "undefined") return;
+    const code = new URL(window.location.href).searchParams.get("error");
     const msg = errorMessageFromCode(code);
     if (msg) setError(msg);
-  }, [searchParams]);
+  }, []);
 
   const refreshLibrary = useCallback(async () => {
     try {
