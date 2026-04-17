@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type FlipPage = {
   index: number;
@@ -30,6 +30,7 @@ export default function Home() {
   );
   const [error, setError] = useState<string | null>(null);
   const [useThumbs, setUseThumbs] = useState(true);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
   const handleScan = useCallback(async () => {
     setStatus("loading");
@@ -98,6 +99,48 @@ export default function Home() {
       </div>
     );
   }, [book]);
+
+  const openViewer = useCallback((index: number) => {
+    setViewerIndex(index);
+  }, []);
+  const closeViewer = useCallback(() => setViewerIndex(null), []);
+  const goPrev = useCallback(() => {
+    setViewerIndex((i) => (i === null || i <= 0 ? i : i - 1));
+  }, []);
+  const goNext = useCallback(() => {
+    if (!book) return;
+    const last = book.pages.length - 1;
+    setViewerIndex((i) => (i === null || i >= last ? i : i + 1));
+  }, [book]);
+
+  useEffect(() => {
+    if (viewerIndex === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goPrev();
+      } else if (e.key === "ArrowRight" || e.key === " ") {
+        e.preventDefault();
+        goNext();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeViewer();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [viewerIndex, goPrev, goNext, closeViewer]);
+
+  const currentPage =
+    book && viewerIndex !== null ? book.pages[viewerIndex] : null;
+  const hasPrev = viewerIndex !== null && viewerIndex > 0;
+  const hasNext =
+    !!book && viewerIndex !== null && viewerIndex < book.pages.length - 1;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
@@ -181,12 +224,12 @@ export default function Home() {
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
               {book.pages.map((p) => (
-                <a
+                <button
                   key={p.index}
-                  href={proxied(p.largeUrl)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 aspect-[2/3] block"
+                  type="button"
+                  onClick={() => openViewer(p.index)}
+                  className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 aspect-2/3 block focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  aria-label={`Open page ${p.pageNumber}`}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
@@ -198,7 +241,7 @@ export default function Home() {
                   <span className="absolute left-1 bottom-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-mono text-zinc-200">
                     {p.pageNumber}
                   </span>
-                </a>
+                </button>
               ))}
             </div>
           </section>
@@ -211,6 +254,105 @@ export default function Home() {
           </section>
         )}
       </main>
+
+      {book && currentPage && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col bg-black/95 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Page ${currentPage.pageNumber}`}
+          onClick={closeViewer}
+        >
+          <div
+            className="flex items-center justify-between px-4 py-3 text-sm text-zinc-300 border-b border-white/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="font-mono">
+              {currentPage.pageNumber} / {book.pages.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <a
+                href={proxied(currentPage.largeUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-white/10"
+              >
+                Open original
+              </a>
+              <button
+                onClick={closeViewer}
+                className="rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-white/10"
+                aria-label="Close viewer"
+              >
+                Close (Esc)
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="relative flex-1 flex items-center justify-center overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={goPrev}
+              disabled={!hasPrev}
+              className="absolute left-2 sm:left-6 top-1/2 -translate-y-1/2 z-10 rounded-full bg-white/10 p-3 text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-30"
+              aria-label="Previous page"
+            >
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              key={currentPage.index}
+              src={proxied(currentPage.largeUrl)}
+              alt={`Page ${currentPage.pageNumber}`}
+              className="max-h-full max-w-full object-contain select-none"
+              draggable={false}
+            />
+
+            <button
+              onClick={goNext}
+              disabled={!hasNext}
+              className="absolute right-2 sm:right-6 top-1/2 -translate-y-1/2 z-10 rounded-full bg-white/10 p-3 text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-30"
+              aria-label="Next page"
+            >
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+          </div>
+
+          <div
+            className="flex items-center justify-center gap-3 px-4 py-3 text-xs text-zinc-500 border-t border-white/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="hidden sm:inline">Arrow keys to navigate</span>
+            <span className="hidden sm:inline">·</span>
+            <span>Esc to close</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

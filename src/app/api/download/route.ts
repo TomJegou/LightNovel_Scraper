@@ -1,4 +1,3 @@
-import { Readable } from "node:stream";
 import JSZip from "jszip";
 import { NextRequest } from "next/server";
 import { fetchBookPages, FlipPage } from "@/lib/fliphtml5";
@@ -78,12 +77,24 @@ export async function POST(req: NextRequest) {
     zip.file("_errors.txt", failures.join("\n"));
   }
 
-  const nodeStream = zip.generateNodeStream({
-    type: "nodebuffer",
+  const internal = zip.generateInternalStream({
+    type: "uint8array",
     streamFiles: true,
     compression: "STORE",
   });
-  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream;
+
+  const webStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      internal
+        .on("data", (chunk: Uint8Array) => controller.enqueue(chunk))
+        .on("error", (err: Error) => controller.error(err))
+        .on("end", () => controller.close());
+      internal.resume();
+    },
+    cancel() {
+      internal.pause();
+    },
+  });
 
   const safeName = book.bookId.replace(/[^a-z0-9_-]/gi, "_");
   return new Response(webStream, {
