@@ -15,14 +15,17 @@ renders them in a clean, keyboard-navigable viewer.
 
 - Paste a FlipHTML5 book URL and list every page (high-resolution `.webp`).
 - Built-in image proxy to bypass hotlink protection and CORS.
-- Full-screen viewer with keyboard shortcuts (`←`, `→`, `Space`, `Esc`).
+- Dedicated reader route (`/read/[id]/[slug]?p=N`) with full-screen viewer,
+  keyboard shortcuts (`←`, `→`, `Space`, `Esc`), thumbnail grid and
+  native browser history (back button closes the reader).
 - One-click download of the whole book as a `<slug>.zip` with pages
   numbered `0001.webp`, `0002.webp`, ...
 - **Library & resume**: every scanned book is persisted in a small SQLite
   database; the home page shows a library grid and clicking a card resumes
   reading at the last page you viewed.
-- Deep-linkable reader (`?url=<book>#p=<N>`) so bookmarks preserve the
-  current page.
+- Shareable deep links: `/read/1/the-eminence-in-shadow-vol-4?p=42`
+  resolves the book from the DB, auto-corrects the slug if it drifted,
+  and opens directly on the requested page.
 - Fully server-side scraping, including WebAssembly-based config
   decryption (FlipHTML5 obfuscates image lists in `config.js`).
 - Hardened for self-hosting: SSRF allowlist, request size/time limits,
@@ -42,10 +45,19 @@ WebAssembly module in an isolated Node `vm` context
 book's base URL and exposed through a typed API.
 
 ```
-Browser ──► /api/pages    ──► fetch config.js ─► WASM decrypt ─► JSON
-Browser ──► /api/image    ──► allowlisted proxy to fliphtml5 CDN
-Browser ──► /api/download ──► parallel downloads ─► streamed ZIP
+Home scan   ──► /api/resolve  ──► fetch <title> HTML ─► upsert book ─► id + slug
+               /read/[id]/[slug]?p=N
+Reader mount ──► /api/library/:id ──► baseUrl + last_page
+             ──► /api/pages        ──► fetch config.js ─► WASM decrypt ─► pages[]
+             ──► /api/library/:id  (PATCH, debounced) ─► persist last_page
+Images       ──► /api/image        ──► allowlisted proxy to fliphtml5 CDN
+ZIP          ──► /api/download     ──► parallel downloads ─► streamed ZIP
 ```
+
+`/api/resolve` is intentionally lightweight: it only fetches the book's
+HTML page to extract the title, so the home → reader redirect is fast
+even on cold books. The full scrape (config.js + WASM decrypt) happens
+once the reader route mounts, which keeps the home page responsive.
 
 ## Requirements
 
@@ -140,6 +152,38 @@ if you expose it publicly.
 
 All API routes run on the Node.js runtime (`export const runtime = "nodejs"`).
 
+### `POST /api/resolve`
+
+Lightweight resolver used by the home page. Validates the URL, fetches
+only the book's HTML page to extract the title, and upserts a minimal
+library entry (with `total_pages = 0` placeholder on first insert).
+
+Request:
+
+```json
+{ "url": "https://online.fliphtml5.com/<owner>/<book>/" }
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "baseUrl": "https://online.fliphtml5.com/<owner>/<book>/",
+  "bookId": "<owner>/<book>",
+  "title": "Book Title",
+  "slug": "book-title",
+  "totalPages": 0,
+  "lastPage": 1
+}
+```
+
+The home page uses `{ id, slug, lastPage }` to redirect to
+`/read/[id]/[slug]?p=N`. Existing library entries are not clobbered:
+`total_pages`, `last_page` and `first_seen_at` are preserved on conflict.
+
+Rate limit: **30 req/min/IP**.
+
 ### `POST /api/pages`
 
 Request:
@@ -218,6 +262,15 @@ access. Capped at 50 entries.
 
 Rate limit: **120 req/min/IP**.
 
+### `GET /api/library/:id`
+
+Returns a single library entry by id. Used by the reader when it mounts
+from a deep link and needs to resolve the book's `baseUrl` without
+rescanning. Returns `200` + the entry, `404` if the id is unknown,
+`400` if the id is malformed.
+
+Rate limit: **120 req/min/IP**.
+
 ### `PATCH /api/library/:id`
 
 Updates the `lastPage` cursor for a library entry. Body:
@@ -264,11 +317,15 @@ src/
 │   ├── api/
 │   │   ├── download/route.ts          # ZIP download
 │   │   ├── image/route.ts             # Image proxy
-│   │   ├── library/route.ts           # Library listing
-│   │   ├── library/[id]/route.ts      # Library update/delete
-│   │   └── pages/route.ts             # Metadata endpoint (+ upsert)
+│   │   ├── library/route.ts           # Library listing (GET)
+│   │   ├── library/[id]/route.ts      # Library entry (GET / PATCH / DELETE)
+│   │   ├── pages/route.ts             # Full scrape + upsert
+│   │   └── resolve/route.ts           # Lightweight title resolver (+ minimal upsert)
+│   ├── read/[id]/[slug]/
+│   │   ├── page.tsx                   # Full-screen reader + thumbnail grid
+│   │   └── loading.tsx                # Skeleton shown during scrape
 │   ├── layout.tsx                     # Root layout
-│   ├── page.tsx                       # Reader UI + library grid
+│   ├── page.tsx                       # Home: URL input + library grid
 │   └── globals.css
 └── lib/
     ├── library.ts                     # SQLite persistence (better-sqlite3)

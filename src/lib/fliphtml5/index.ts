@@ -52,7 +52,7 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
 }
 
-async function fetchBookTitle(baseUrl: string): Promise<string | null> {
+export async function fetchBookTitle(baseUrl: string): Promise<string | null> {
   try {
     const { response, body } = await boundedFetch(baseUrl, {
       headers: {

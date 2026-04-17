@@ -96,6 +96,43 @@ export type UpsertInput = {
   totalPages: number;
 };
 
+export type UpsertMinimalInput = Omit<UpsertInput, "totalPages">;
+
+/**
+ * Lightweight upsert used when we only know the book's identity (title + slug)
+ * and haven't scraped the pages yet. On insert, `total_pages` is left at 0
+ * (placeholder); on conflict, we only refresh title/slug/last_read_at — the
+ * existing `total_pages`, `last_page` and `first_seen_at` are preserved.
+ */
+export function upsertMinimal(input: UpsertMinimalInput): LibraryEntry {
+  const db = getDb();
+  const now = Date.now();
+
+  const stmt = db.prepare(`
+    INSERT INTO books (
+      base_url, book_id, title, slug, total_pages,
+      last_page, first_seen_at, last_read_at
+    )
+    VALUES (@base_url, @book_id, @title, @slug, 0, 1, @now, @now)
+    ON CONFLICT(base_url) DO UPDATE SET
+      book_id      = excluded.book_id,
+      title        = excluded.title,
+      slug         = excluded.slug,
+      last_read_at = excluded.last_read_at
+    RETURNING *
+  `);
+
+  const row = stmt.get({
+    base_url: input.baseUrl,
+    book_id: input.bookId,
+    title: input.title,
+    slug: input.slug,
+    now,
+  }) as LibraryRow;
+
+  return rowToEntry(row);
+}
+
 /**
  * Insert-or-update a book entry keyed on base_url. Preserves last_page and
  * first_seen_at on conflict (only refreshes metadata + last_read_at).
@@ -154,13 +191,18 @@ export function getBook(id: number): LibraryEntry | null {
 /**
  * Update the last_page cursor and bump last_read_at. Silently clamps the
  * page to [1, total_pages] so clients can't persist out-of-range values.
+ * When total_pages is still 0 (row created by /api/resolve before a full
+ * scan ran), we clamp the upper bound to the incoming page so we never
+ * persist last_page < 1.
  */
 export function updateLastPage(id: number, page: number): LibraryEntry | null {
   const db = getDb();
   const current = getBook(id);
   if (!current) return null;
 
-  const clamped = Math.min(Math.max(1, Math.trunc(page)), current.totalPages);
+  const requested = Math.max(1, Math.trunc(page));
+  const upperBound = current.totalPages > 0 ? current.totalPages : requested;
+  const clamped = Math.min(requested, upperBound);
   const now = Date.now();
 
   const row = db
