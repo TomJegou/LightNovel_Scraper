@@ -58,10 +58,8 @@ export default function ReaderPage() {
   const id = Number(idParam);
   const idIsValid = Number.isFinite(id) && id > 0 && String(id) === idParam;
 
-  const requestedPage = useMemo(
-    () => parsePageParam(searchParams?.get("p") ?? null),
-    [searchParams],
-  );
+  const pParam = searchParams.get("p");
+  const requestedPage = useMemo(() => parsePageParam(pParam), [pParam]);
 
   const [entry, setEntry] = useState<LibraryEntry | null>(null);
   const [book, setBook] = useState<FlipBook | null>(null);
@@ -75,6 +73,7 @@ export default function ReaderPage() {
 
   const lastSentPageRef = useRef<number | null>(null);
   const hasAppliedInitialPageRef = useRef(false);
+  const lastFetchedLibraryIdRef = useRef<number | null>(null);
 
   // Bootstrap: fetch the library entry (cheap) then the full page list.
   useEffect(() => {
@@ -84,6 +83,14 @@ export default function ReaderPage() {
     }
 
     let cancelled = false;
+    const switchedBook = lastFetchedLibraryIdRef.current !== id;
+    if (switchedBook) {
+      lastFetchedLibraryIdRef.current = id;
+      hasAppliedInitialPageRef.current = false;
+      lastSentPageRef.current = null;
+      setBook(null);
+      setEntry(null);
+    }
 
     (async () => {
       try {
@@ -105,7 +112,10 @@ export default function ReaderPage() {
         setEntry(libEntry);
 
         if (libEntry.slug && libEntry.slug !== slugParam) {
-          const p = searchParams?.get("p");
+          const p =
+            typeof window === "undefined"
+              ? null
+              : new URL(window.location.href).searchParams.get("p");
           const qs = p ? `?p=${encodeURIComponent(p)}` : "";
           router.replace(
             `/read/${libEntry.id}/${encodeURIComponent(libEntry.slug)}${qs}`,
@@ -144,30 +154,22 @@ export default function ReaderPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, idIsValid, router, slugParam, searchParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- do not depend on
+    // `searchParams` / `pParam`: that would re-fetch on every ?p=N from the reader.
+  }, [id, idIsValid, router, slugParam]);
 
-  // Clamp the initial page to the book's actual range once we know the total.
-  // We only do this once per book load so external navigation (history back
-  // with a different ?p=) still re-syncs via the searchParams effect below.
+  // Keep currentIndex in sync with ?p= (initial load + browser back/forward).
   useEffect(() => {
     if (!book) return;
-    if (hasAppliedInitialPageRef.current) return;
-    hasAppliedInitialPageRef.current = true;
     const clamped = Math.min(
       Math.max(0, requestedPage - 1),
       book.pages.length - 1,
     );
-    setCurrentIndex(clamped);
-  }, [book, requestedPage]);
-
-  // Also react to searchParams changes (back/forward button in the same reader).
-  useEffect(() => {
-    if (!book) return;
-    if (!hasAppliedInitialPageRef.current) return;
-    const clamped = Math.min(
-      Math.max(0, requestedPage - 1),
-      book.pages.length - 1,
-    );
+    if (!hasAppliedInitialPageRef.current) {
+      hasAppliedInitialPageRef.current = true;
+      setCurrentIndex(clamped);
+      return;
+    }
     setCurrentIndex((cur) => (cur === clamped ? cur : clamped));
   }, [book, requestedPage]);
 
@@ -243,7 +245,6 @@ export default function ReaderPage() {
 
   // Document title reflects current page for easy tab identification.
   useEffect(() => {
-    if (typeof document === "undefined") return;
     const base = book?.title ?? entry?.title ?? entry?.bookId ?? APP_NAME;
     if (book && currentPage) {
       document.title = `${base} · p. ${Number(currentPage.pageNumber)} / ${book.pages.length}`;
@@ -414,16 +415,14 @@ export default function ReaderPage() {
               </span>
             </div>
           ) : (
-            <>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                key={currentPage.index}
-                src={proxied(currentPage.largeUrl)}
-                alt={`Page ${currentPage.pageNumber}`}
-                className="max-h-[min(78dvh,calc(100dvh-12rem))] w-full max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
-                draggable={false}
-              />
-            </>
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              key={currentPage.index}
+              src={proxied(currentPage.largeUrl)}
+              alt={`Page ${currentPage.pageNumber}`}
+              className="max-h-[min(78dvh,calc(100dvh-12rem))] w-full max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
+              draggable={false}
+            />
           )}
         </div>
       </div>
