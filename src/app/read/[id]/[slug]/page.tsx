@@ -21,6 +21,8 @@ type FlipBook = {
   totalPageCount: number;
   pages: FlipPage[];
   libraryId: number | null;
+  /** True when large + thumb for every page are on disk under BOOK_CACHE_DIR. */
+  pagesCached?: boolean;
 };
 
 type LibraryEntry = {
@@ -37,8 +39,18 @@ type LibraryEntry = {
 const APP_NAME = "FlipHTML5 Scraper";
 const PROGRESS_DEBOUNCE_MS = 1500;
 
-function proxied(url: string) {
-  return `/api/image?u=${encodeURIComponent(url)}`;
+type ImageKind = "large" | "thumb";
+
+function imageSrc(
+  book: FlipBook | null,
+  pageNumber: string,
+  remoteUrl: string,
+  kind: ImageKind,
+): string {
+  if (book?.libraryId && book.pagesCached) {
+    return `/api/library-cache?id=${book.libraryId}&page=${encodeURIComponent(pageNumber)}&kind=${kind}`;
+  }
+  return `/api/image?u=${encodeURIComponent(remoteUrl)}`;
 }
 
 function parsePageParam(raw: string | null): number {
@@ -421,7 +433,12 @@ export default function ReaderPage() {
             /* eslint-disable-next-line @next/next/no-img-element */
             <img
               key={currentPage.index}
-              src={proxied(currentPage.largeUrl)}
+              src={imageSrc(
+                book,
+                currentPage.pageNumber,
+                currentPage.largeUrl,
+                "large",
+              )}
               alt={`Page ${currentPage.pageNumber}`}
               className="max-h-[min(78dvh,calc(100dvh-12rem))] w-full max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
               draggable={false}
@@ -462,7 +479,7 @@ export default function ReaderPage() {
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={proxied(p.thumbUrl)}
+                      src={imageSrc(book, p.pageNumber, p.thumbUrl, "thumb")}
                       alt={`Page ${p.pageNumber}`}
                       loading="lazy"
                       className="absolute inset-0 h-full w-full object-cover transition group-hover:opacity-80"

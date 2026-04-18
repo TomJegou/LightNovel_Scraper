@@ -39,10 +39,11 @@ COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=build --chown=nextjs:nodejs /app/public ./public
 
-# Writable directory for the SQLite library DB. Mounted as a Docker volume
-# in production so data survives container rebuilds.
-RUN mkdir -p /data && chown nextjs:nodejs /data
-ENV LIBRARY_DB_PATH=/data/library.db
+# Writable directories for the SQLite library DB and on-disk page cache
+# (large + thumb .webp per book). Both live under the same volume mount.
+RUN mkdir -p /data /data/book-cache && chown -R nextjs:nodejs /data
+ENV LIBRARY_DB_PATH=/data/library.db \
+    BOOK_CACHE_DIR=/data/book-cache
 
 USER nextjs
 EXPOSE 3000

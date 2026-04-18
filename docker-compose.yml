@@ -12,6 +12,7 @@ services:
       HOSTNAME: "0.0.0.0"
       NEXT_TELEMETRY_DISABLED: "1"
       LIBRARY_DB_PATH: /data/library.db
+      BOOK_CACHE_DIR: /data/book-cache
     ports:
       - "46460:3000"
     read_only: true

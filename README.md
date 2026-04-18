@@ -25,6 +25,10 @@ renders them in a clean, keyboard-navigable viewer.
   progress itself is kept **per-client in `localStorage`**, so each
   browser tracks its own "last page read" without leaking it to other
   viewers of the same server.
+- **On-disk mirror**: after each successful full scrape, **large and thumb**
+  `.webp` files are copied to `BOOK_CACHE_DIR` (same Docker volume as the
+  DB by default). The reader serves them locally when complete, so you can
+  keep reading if FlipHTML5 changes or the CDN becomes unreachable.
 - Shareable deep links: `/read/1/the-eminence-in-shadow-vol-4?p=42`
   resolves the book from the DB, auto-corrects the slug if it drifted,
   and opens directly on the requested page.
@@ -52,8 +56,9 @@ Home scan   ──► /api/resolve  ──► fetch <title> HTML ─► upsert b
                 /read/[id]/[slug]?p=N
 Reader mount ──► /api/library/:id ──► baseUrl + metadata
              ──► /api/pages        ──► fetch config.js ─► WASM decrypt ─► pages[]
+                               └──► mirror large+thumb .webp ─► BOOK_CACHE_DIR
              ──► localStorage      ──► debounced save of current page
-Images       ──► /api/image        ──► allowlisted proxy to fliphtml5 CDN
+Images       ──► /api/library-cache  (if mirror complete) or /api/image (proxy)
 ZIP          ──► /api/download     ──► parallel downloads ─► streamed ZIP
 ```
 
@@ -128,9 +133,21 @@ container writes it to `/data/library.db`, which is mounted from the named
 volume `lightnovel-data`. Everything else on the container runs on a
 read-only root filesystem, so only this volume is writable.
 
+After a successful full scrape (`POST /api/pages`), the server also mirrors
+**every large and thumb `.webp`** for that book onto disk under
+`BOOK_CACHE_DIR` (default in Docker: `/data/book-cache/<libraryId>/large/`
+and `.../thumb/`). A `.complete` marker is written only when both trees
+finished without errors. The reader then serves images from
+`GET /api/library-cache` instead of proxying FlipHTML5, so your library
+keeps working if the upstream CDN changes or goes away (as long as the
+files remain on your volume).
+
 - **Override the path** (dev or custom deployments):
   `LIBRARY_DB_PATH=/absolute/path/to/library.db`. Outside of Docker the
   default is `./data/library.db` relative to the working directory.
+- **Page cache directory**: `BOOK_CACHE_DIR=/absolute/path/to/cache`. In
+  Docker Compose this is set to `/data/book-cache` on the same volume as
+  the database. Dev default: `./data/book-cache`.
 - **Backup** the database from a running container:
   ```bash
   docker cp lightnovel-scraper:/data/library.db ./library.db
@@ -213,13 +230,21 @@ Response:
       "thumbUrl": "https://online.fliphtml5.com/.../thumb/<hash>.webp"
     }
   ],
-  "libraryId": 1
+  "libraryId": 1,
+  "pagesCached": true
 }
 ```
 
 The call also upserts the book into the server-side library so it shows
 up on the home page. `libraryId` is returned so the reader can key its
 local `localStorage` reading-progress entry against a stable id.
+`pagesCached` is `true` when **all** large and thumb images for the book
+were written under `BOOK_CACHE_DIR` (otherwise `false` and the reader
+falls back to the live image proxy).
+
+The first successful scrape for a book can take a long time (download cap
+matches the ZIP pipeline). The route allows up to **600 s** server time
+(`maxDuration`).
 
 Rate limit: **20 req/min/IP**.
 
@@ -229,6 +254,21 @@ Proxies a FlipHTML5 CDN image. The `u` parameter must point to a host in
 the allowlist (`online.fliphtml5.com`, `static.fliphtml5.com`) over HTTPS.
 Returns the binary with a safe, whitelisted `Content-Type` and
 `X-Content-Type-Options: nosniff`.
+
+Rate limit: **600 req/min/IP**.
+
+### `GET /api/library-cache?id=<n>&page=<label>&kind=<large|thumb>`
+
+Serves a previously mirrored `.webp` from `BOOK_CACHE_DIR` (no upstream
+fetch). Query parameters:
+
+- `id` — library row id (positive integer).
+- `page` — same label as in the scrape payload (e.g. `0001`), max 6 digits.
+- `kind` — `large` (default) or `thumb`.
+
+The handler checks the book exists in SQLite and that `page` is in range
+when `totalPages` is known. Returns `404` if the file is missing (e.g.
+cache incomplete or cleared).
 
 Rate limit: **600 req/min/IP**.
 
@@ -278,7 +318,8 @@ Rate limit: **120 req/min/IP**.
 
 ### `DELETE /api/library/:id`
 
-Removes an entry from the library. Returns `204` on success. Rate limit:
+Removes an entry from the library and **deletes its on-disk page cache**
+folder (if present). Returns `204` on success. Rate limit:
 **60 req/min/IP**.
 
 ## Reading progress
@@ -329,9 +370,10 @@ src/
 │   ├── api/
 │   │   ├── download/route.ts          # ZIP download
 │   │   ├── image/route.ts             # Image proxy
+│   │   ├── library-cache/route.ts     # Serve mirrored large/thumb from disk
 │   │   ├── library/route.ts           # Library listing (GET)
 │   │   ├── library/[id]/route.ts      # Library entry (GET / DELETE)
-│   │   ├── pages/route.ts             # Full scrape + upsert
+│   │   ├── pages/route.ts             # Full scrape + upsert + disk mirror
 │   │   └── resolve/route.ts           # Lightweight title resolver (+ minimal upsert)
 │   ├── read/[id]/[slug]/
 │   │   ├── page.tsx                   # Full-screen reader + thumbnail grid
@@ -340,6 +382,7 @@ src/
 │   ├── page.tsx                       # Home: URL input + library grid
 │   └── globals.css
 └── lib/
+    ├── book-cache.ts                  # Mirror large+thumb to disk; read helpers
     ├── library.ts                     # SQLite persistence (better-sqlite3)
     ├── progress.ts                    # Per-client reading progress (localStorage)
     ├── security.ts                    # Allowlist, bounded fetch, rate limit

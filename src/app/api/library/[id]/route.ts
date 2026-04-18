@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { removeBookCache } from "@/lib/book-cache";
 import { deleteBook, getBook } from "@/lib/library";
 import { rateLimit, sanitizeError, tooManyRequests } from "@/lib/security";
 
@@ -53,6 +54,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     if (!ok) {
       return Response.json({ error: "Not found" }, { status: 404 });
     }
+    removeBookCache(id);
     return new Response(null, { status: 204 });
   } catch (e) {
     return Response.json(

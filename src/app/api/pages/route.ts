@@ -1,10 +1,13 @@
 import { NextRequest } from "next/server";
+import { ensureBookPagesOnDisk } from "@/lib/book-cache";
 import { fetchBookPages } from "@/lib/fliphtml5";
 import { upsertBook } from "@/lib/library";
 import { rateLimit, sanitizeError, tooManyRequests } from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** First full scrape also mirrors all large + thumb images to disk. */
+export const maxDuration = 600;
 
 export async function POST(req: NextRequest) {
   const rl = rateLimit(req, "pages", 20, 60_000);
@@ -41,7 +44,22 @@ export async function POST(req: NextRequest) {
       console.error("library upsert failed:", err);
     }
 
-    return Response.json({ ...book, libraryId });
+    let pagesCached = false;
+    if (libraryId !== null && book.pages.length > 0) {
+      try {
+        const { complete } = await ensureBookPagesOnDisk(libraryId, book.pages);
+        pagesCached = complete;
+        if (!complete) {
+          console.warn(
+            `book-cache incomplete for libraryId=${libraryId} (${book.pages.length} pages)`,
+          );
+        }
+      } catch (err) {
+        console.error("book-cache failed:", err);
+      }
+    }
+
+    return Response.json({ ...book, libraryId, pagesCached });
   } catch (e) {
     return Response.json(
       { error: sanitizeError(e, "Failed to fetch book metadata") },
