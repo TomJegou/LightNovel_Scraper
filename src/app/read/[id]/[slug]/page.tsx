@@ -184,7 +184,8 @@ export default function ReaderPage() {
     setCurrentIndex((i) => (i >= last ? i : i + 1));
   }, [book]);
 
-  // Keyboard shortcuts + lock scroll while the reader is open.
+  // Keyboard shortcuts (do not lock body scroll — users need to scroll to
+  // the thumbnail grid on mobile, and overflow:hidden on body breaks that).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") {
@@ -199,11 +200,8 @@ export default function ReaderPage() {
       }
     };
     window.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
     };
   }, [goPrev, goNext, router]);
 
@@ -302,9 +300,9 @@ export default function ReaderPage() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-zinc-100 font-sans">
-      {/* Top bar */}
-      <div className="sticky top-0 z-40 border-b border-white/10 bg-black/70 backdrop-blur">
+    <div className="flex min-h-dvh flex-col overflow-x-hidden bg-black text-zinc-100 font-sans">
+      {/* Sticky header + page nav (all breakpoints) */}
+      <div className="sticky top-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center gap-4 px-4 py-3">
           <Link
             href="/"
@@ -345,73 +343,89 @@ export default function ReaderPage() {
             {error}
           </div>
         )}
-      </div>
 
-      {/* Full-screen viewer */}
-      <div className="relative flex min-h-[calc(100vh-56px)] items-center justify-center overflow-hidden">
-        {status === "bootstrapping" || status === "scanning" || !currentPage ? (
-          <div className="flex flex-col items-center gap-3 text-sm text-zinc-400">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-zinc-600 border-t-sky-400" />
-            <span>
-              {status === "bootstrapping"
-                ? "Loading book…"
-                : status === "scanning"
-                  ? "Fetching pages…"
-                  : "Preparing viewer…"}
-            </span>
-          </div>
-        ) : (
-          <>
+        {book && currentPage && (
+          <nav
+            className="mx-auto flex w-full max-w-6xl gap-3 border-t border-white/10 bg-zinc-950/80 px-3 py-2.5 backdrop-blur-sm sm:py-3"
+            aria-label="Page navigation"
+          >
             <button
+              type="button"
               onClick={goPrev}
               disabled={!hasPrev}
-              className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-30 sm:left-6"
+              className="flex min-h-11 min-w-0 flex-1 items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900/90 py-2.5 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800/90 active:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-12 sm:py-3"
               aria-label="Previous page"
             >
               <svg
-                width="24"
-                height="24"
+                className="shrink-0"
+                width="20"
+                height="20"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                aria-hidden
               >
                 <polyline points="15 18 9 12 15 6" />
               </svg>
+              <span>Previous</span>
             </button>
-
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              key={currentPage.index}
-              src={proxied(currentPage.largeUrl)}
-              alt={`Page ${currentPage.pageNumber}`}
-              className="max-h-[calc(100vh-56px)] max-w-full select-none object-contain"
-              draggable={false}
-            />
-
             <button
+              type="button"
               onClick={goNext}
               disabled={!hasNext}
-              className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-30 sm:right-6"
+              className="flex min-h-11 min-w-0 flex-1 items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900/90 py-2.5 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800/90 active:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-12 sm:py-3"
               aria-label="Next page"
             >
+              <span>Next</span>
               <svg
-                width="24"
-                height="24"
+                className="shrink-0"
+                width="20"
+                height="20"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                aria-hidden
               >
                 <polyline points="9 18 15 12 9 6" />
               </svg>
             </button>
-          </>
+          </nav>
         )}
+      </div>
+
+      {/* Main page image */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-x-hidden">
+        <div className="relative flex min-h-[50dvh] flex-1 items-center justify-center px-2 py-3 md:min-h-0 md:px-4 md:py-4">
+          {status === "bootstrapping" || status === "scanning" || !currentPage ? (
+            <div className="flex flex-col items-center gap-3 text-sm text-zinc-400">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-zinc-600 border-t-sky-400" />
+              <span>
+                {status === "bootstrapping"
+                  ? "Loading book…"
+                  : status === "scanning"
+                    ? "Fetching pages…"
+                    : "Preparing viewer…"}
+              </span>
+            </div>
+          ) : (
+            <>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                key={currentPage.index}
+                src={proxied(currentPage.largeUrl)}
+                alt={`Page ${currentPage.pageNumber}`}
+                className="max-h-[min(78dvh,calc(100dvh-12rem))] w-full max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
+                draggable={false}
+              />
+            </>
+          )}
+        </div>
       </div>
 
       {/* Thumbnail grid */}
