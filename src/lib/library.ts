@@ -12,7 +12,6 @@ export type LibraryEntry = {
   title: string | null;
   slug: string;
   totalPages: number;
-  lastPage: number;
   firstSeenAt: number;
   lastReadAt: number;
 };
@@ -24,7 +23,6 @@ type LibraryRow = {
   title: string | null;
   slug: string;
   total_pages: number;
-  last_page: number;
   first_seen_at: number;
   last_read_at: number;
 };
@@ -37,7 +35,6 @@ function rowToEntry(row: LibraryRow): LibraryEntry {
     title: row.title,
     slug: row.slug,
     totalPages: row.total_pages,
-    lastPage: row.last_page,
     firstSeenAt: row.first_seen_at,
     lastReadAt: row.last_read_at,
   };
@@ -68,6 +65,11 @@ function getDb(): Db {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
 
+  // Note: `last_page` is kept in the schema for backwards compatibility
+  // with existing databases (reading progress used to live server-side).
+  // It is now a dead column — progress is stored per-client in
+  // localStorage. The column defaults to 1 and is never read/written by
+  // the application anymore.
   db.exec(`
     CREATE TABLE IF NOT EXISTS books (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,10 +101,10 @@ export type UpsertInput = {
 export type UpsertMinimalInput = Omit<UpsertInput, "totalPages">;
 
 /**
- * Lightweight upsert used when we only know the book's identity (title + slug)
- * and haven't scraped the pages yet. On insert, `total_pages` is left at 0
- * (placeholder); on conflict, we only refresh title/slug/last_read_at — the
- * existing `total_pages`, `last_page` and `first_seen_at` are preserved.
+ * Lightweight upsert used when we only know the book's identity (title +
+ * slug) and haven't scraped the pages yet. On insert, `total_pages` is
+ * left at 0 (placeholder). On conflict we refresh title/slug/last_read_at
+ * only; `total_pages` and `first_seen_at` are preserved.
  */
 export function upsertMinimal(input: UpsertMinimalInput): LibraryEntry {
   const db = getDb();
@@ -111,9 +113,9 @@ export function upsertMinimal(input: UpsertMinimalInput): LibraryEntry {
   const stmt = db.prepare(`
     INSERT INTO books (
       base_url, book_id, title, slug, total_pages,
-      last_page, first_seen_at, last_read_at
+      first_seen_at, last_read_at
     )
-    VALUES (@base_url, @book_id, @title, @slug, 0, 1, @now, @now)
+    VALUES (@base_url, @book_id, @title, @slug, 0, @now, @now)
     ON CONFLICT(base_url) DO UPDATE SET
       book_id      = excluded.book_id,
       title        = excluded.title,
@@ -134,8 +136,8 @@ export function upsertMinimal(input: UpsertMinimalInput): LibraryEntry {
 }
 
 /**
- * Insert-or-update a book entry keyed on base_url. Preserves last_page and
- * first_seen_at on conflict (only refreshes metadata + last_read_at).
+ * Insert-or-update a book entry keyed on base_url. Refreshes metadata +
+ * last_read_at on conflict; `first_seen_at` is preserved.
  */
 export function upsertBook(input: UpsertInput): LibraryEntry {
   const db = getDb();
@@ -144,9 +146,9 @@ export function upsertBook(input: UpsertInput): LibraryEntry {
   const stmt = db.prepare(`
     INSERT INTO books (
       base_url, book_id, title, slug, total_pages,
-      last_page, first_seen_at, last_read_at
+      first_seen_at, last_read_at
     )
-    VALUES (@base_url, @book_id, @title, @slug, @total_pages, 1, @now, @now)
+    VALUES (@base_url, @book_id, @title, @slug, @total_pages, @now, @now)
     ON CONFLICT(base_url) DO UPDATE SET
       book_id      = excluded.book_id,
       title        = excluded.title,
@@ -185,34 +187,6 @@ export function getBook(id: number): LibraryEntry | null {
   const row = db
     .prepare(`SELECT * FROM books WHERE id = ?`)
     .get(id) as LibraryRow | undefined;
-  return row ? rowToEntry(row) : null;
-}
-
-/**
- * Update the last_page cursor and bump last_read_at. Silently clamps the
- * page to [1, total_pages] so clients can't persist out-of-range values.
- * When total_pages is still 0 (row created by /api/resolve before a full
- * scan ran), we clamp the upper bound to the incoming page so we never
- * persist last_page < 1.
- */
-export function updateLastPage(id: number, page: number): LibraryEntry | null {
-  const db = getDb();
-  const current = getBook(id);
-  if (!current) return null;
-
-  const requested = Math.max(1, Math.trunc(page));
-  const upperBound = current.totalPages > 0 ? current.totalPages : requested;
-  const clamped = Math.min(requested, upperBound);
-  const now = Date.now();
-
-  const row = db
-    .prepare(
-      `UPDATE books
-       SET last_page = ?, last_read_at = ?
-       WHERE id = ?
-       RETURNING *`,
-    )
-    .get(clamped, now, id) as LibraryRow | undefined;
   return row ? rowToEntry(row) : null;
 }
 

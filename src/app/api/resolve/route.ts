@@ -42,7 +42,6 @@ export async function POST(req: NextRequest) {
       title: entry.title,
       slug: entry.slug,
       totalPages: entry.totalPages,
-      lastPage: entry.lastPage,
     });
   } catch (e) {
     return Response.json(

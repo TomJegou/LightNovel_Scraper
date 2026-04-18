@@ -20,9 +20,11 @@ renders them in a clean, keyboard-navigable viewer.
   native browser history (back button closes the reader).
 - One-click download of the whole book as a `<slug>.zip` with pages
   numbered `0001.webp`, `0002.webp`, ...
-- **Library & resume**: every scanned book is persisted in a small SQLite
-  database; the home page shows a library grid and clicking a card resumes
-  reading at the last page you viewed.
+- **Library & resume**: every scanned book is persisted server-side in a
+  small SQLite database; the home page shows a library grid. Reading
+  progress itself is kept **per-client in `localStorage`**, so each
+  browser tracks its own "last page read" without leaking it to other
+  viewers of the same server.
 - Shareable deep links: `/read/1/the-eminence-in-shadow-vol-4?p=42`
   resolves the book from the DB, auto-corrects the slug if it drifted,
   and opens directly on the requested page.
@@ -46,10 +48,11 @@ book's base URL and exposed through a typed API.
 
 ```
 Home scan   ──► /api/resolve  ──► fetch <title> HTML ─► upsert book ─► id + slug
-               /read/[id]/[slug]?p=N
-Reader mount ──► /api/library/:id ──► baseUrl + last_page
+                localStorage  ──► lookup saved ?p= for this id
+                /read/[id]/[slug]?p=N
+Reader mount ──► /api/library/:id ──► baseUrl + metadata
              ──► /api/pages        ──► fetch config.js ─► WASM decrypt ─► pages[]
-             ──► /api/library/:id  (PATCH, debounced) ─► persist last_page
+             ──► localStorage      ──► debounced save of current page
 Images       ──► /api/image        ──► allowlisted proxy to fliphtml5 CDN
 ZIP          ──► /api/download     ──► parallel downloads ─► streamed ZIP
 ```
@@ -173,14 +176,15 @@ Response:
   "bookId": "<owner>/<book>",
   "title": "Book Title",
   "slug": "book-title",
-  "totalPages": 0,
-  "lastPage": 1
+  "totalPages": 0
 }
 ```
 
-The home page uses `{ id, slug, lastPage }` to redirect to
-`/read/[id]/[slug]?p=N`. Existing library entries are not clobbered:
-`total_pages`, `last_page` and `first_seen_at` are preserved on conflict.
+The home page uses `{ id, slug }` to redirect to `/read/[id]/[slug]?p=N`,
+where `N` is looked up in the client's `localStorage` (defaults to `1`
+if the book has never been opened in this browser). Existing library
+entries are not clobbered: `total_pages` and `first_seen_at` are
+preserved on conflict.
 
 Rate limit: **30 req/min/IP**.
 
@@ -209,14 +213,13 @@ Response:
       "thumbUrl": "https://online.fliphtml5.com/.../thumb/<hash>.webp"
     }
   ],
-  "libraryId": 1,
-  "lastPage": 1
+  "libraryId": 1
 }
 ```
 
 The call also upserts the book into the server-side library so it shows
-up on the home page. `libraryId` + `lastPage` are returned so the UI can
-resume at the last-read page and later `PATCH` its progress.
+up on the home page. `libraryId` is returned so the reader can key its
+local `localStorage` reading-progress entry against a stable id.
 
 Rate limit: **20 req/min/IP**.
 
@@ -252,13 +255,15 @@ access. Capped at 50 entries.
       "title": "Book Title",
       "slug": "book-title",
       "totalPages": 261,
-      "lastPage": 42,
       "firstSeenAt": 1734000000000,
       "lastReadAt": 1734100000000
     }
   ]
 }
 ```
+
+Reading progress (`lastPage`) is not returned here — it lives in the
+client's `localStorage` (see _Reading progress_ below).
 
 Rate limit: **120 req/min/IP**.
 
@@ -271,21 +276,28 @@ rescanning. Returns `200` + the entry, `404` if the id is unknown,
 
 Rate limit: **120 req/min/IP**.
 
-### `PATCH /api/library/:id`
-
-Updates the `lastPage` cursor for a library entry. Body:
-
-```json
-{ "lastPage": 42 }
-```
-
-Values are clamped to `[1, totalPages]`. Rate limit: **300 req/min/IP**
-(the reader debounces this, so real-world traffic is much lower).
-
 ### `DELETE /api/library/:id`
 
 Removes an entry from the library. Returns `204` on success. Rate limit:
 **60 req/min/IP**.
+
+## Reading progress
+
+The "last page read" is stored **per client in `localStorage`**, not on
+the server. This is intentional: multiple people using the same
+self-hosted instance would otherwise stomp on each other's progress,
+and there is no user account system to attach it to.
+
+- Key: `lightnovel-scraper.progress.v1`
+- Shape: `{ [libraryId]: { lastPage: number, updatedAt: number } }`
+- Capped at 500 entries (oldest dropped by `updatedAt`).
+- Written debounced (~1.5 s) from the reader; read by the home page to
+  render "Resume p. N" and to send the user directly to the right
+  `?p=N` on click.
+
+Removing a book from the library also clears its local progress entry.
+Clearing site data in the browser resets the cursor for every book (the
+books themselves stay in the server's SQLite library).
 
 ## Security
 
@@ -318,7 +330,7 @@ src/
 │   │   ├── download/route.ts          # ZIP download
 │   │   ├── image/route.ts             # Image proxy
 │   │   ├── library/route.ts           # Library listing (GET)
-│   │   ├── library/[id]/route.ts      # Library entry (GET / PATCH / DELETE)
+│   │   ├── library/[id]/route.ts      # Library entry (GET / DELETE)
 │   │   ├── pages/route.ts             # Full scrape + upsert
 │   │   └── resolve/route.ts           # Lightweight title resolver (+ minimal upsert)
 │   ├── read/[id]/[slug]/
@@ -329,6 +341,7 @@ src/
 │   └── globals.css
 └── lib/
     ├── library.ts                     # SQLite persistence (better-sqlite3)
+    ├── progress.ts                    # Per-client reading progress (localStorage)
     ├── security.ts                    # Allowlist, bounded fetch, rate limit
     └── fliphtml5/
         ├── decoder.ts                 # WASM loader (vm sandbox)

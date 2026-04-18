@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import {
+  clearProgress,
+  listProgress,
+  type ProgressEntry,
+} from "@/lib/progress";
 
 type LibraryEntry = {
   id: number;
@@ -11,7 +17,6 @@ type LibraryEntry = {
   title: string | null;
   slug: string;
   totalPages: number;
-  lastPage: number;
   firstSeenAt: number;
   lastReadAt: number;
 };
@@ -19,7 +24,6 @@ type LibraryEntry = {
 type ResolveResponse = {
   id: number;
   slug: string;
-  lastPage: number;
 };
 
 function formatRelative(ms: number): string {
@@ -56,6 +60,15 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
+  // Per-client reading progress pulled from localStorage. Keyed on
+  // library id. The `progress` state drives re-renders for the cards;
+  // the ref mirrors it so click handlers always read the freshest value
+  // without having to depend on the state (which would re-bind the
+  // handler and ripple through any memoized children).
+  const [progress, setProgressState] = useState<Record<string, ProgressEntry>>(
+    {},
+  );
+  const progressRef = useRef<Record<string, ProgressEntry>>({});
 
   // Read `?error=<code>` once on mount from window.location to surface
   // messages set by the reader on redirect (unknown id, slug mismatch…).
@@ -85,6 +98,24 @@ export default function Home() {
     void refreshLibrary();
   }, [refreshLibrary]);
 
+  // Load per-client reading progress once on mount and refresh on
+  // window focus / pageshow so returning from the reader updates the
+  // "Resume p. N" indicators without a hard refresh.
+  useEffect(() => {
+    const load = () => {
+      const all = listProgress();
+      progressRef.current = all;
+      setProgressState(all);
+    };
+    load();
+    window.addEventListener("focus", load);
+    window.addEventListener("pageshow", load);
+    return () => {
+      window.removeEventListener("focus", load);
+      window.removeEventListener("pageshow", load);
+    };
+  }, []);
+
   const handleScan = useCallback(async () => {
     const effective = url.trim();
     if (!effective) return;
@@ -103,7 +134,11 @@ export default function Home() {
         );
       }
       const data = payload as ResolveResponse;
-      const page = data.lastPage > 0 ? data.lastPage : 1;
+      // Fall back to a fresh localStorage read if the effect hasn't
+      // populated the ref yet (e.g. user pressed Enter before paint).
+      const store = progressRef.current ?? listProgress();
+      const saved = store[String(data.id)]?.lastPage ?? 1;
+      const page = saved > 0 ? saved : 1;
       router.push(`/read/${data.id}/${encodeURIComponent(data.slug)}?p=${page}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -116,6 +151,16 @@ export default function Home() {
   const handleDeleteFromLibrary = useCallback(
     async (id: number) => {
       setLibrary((prev) => prev.filter((e) => e.id !== id));
+      // Also drop the local reading progress for this entry so the
+      // resume hint disappears even if the same id is re-used later.
+      clearProgress(id);
+      setProgressState((prev) => {
+        if (!(String(id) in prev)) return prev;
+        const next = { ...prev };
+        delete next[String(id)];
+        progressRef.current = next;
+        return next;
+      });
       try {
         const res = await fetch(`/api/library/${id}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
@@ -197,20 +242,25 @@ export default function Home() {
               {library.map((entry) => {
                 const displayTitle = entry.title ?? entry.bookId;
                 const total = Math.max(1, entry.totalPages);
+                const savedPage = progress[String(entry.id)]?.lastPage ?? 0;
+                const lastPage = savedPage > 0 ? savedPage : 1;
                 const progressPct = Math.min(
                   100,
-                  Math.round((entry.lastPage / total) * 100),
+                  Math.round((lastPage / total) * 100),
                 );
-                const page = entry.lastPage > 0 ? entry.lastPage : 1;
                 return (
                   <div
                     key={entry.id}
                     className="group relative rounded-lg border border-zinc-800 bg-zinc-950 p-4 transition hover:border-sky-500/60"
                   >
                     <Link
-                      href={`/read/${entry.id}/${encodeURIComponent(entry.slug)}?p=${page}`}
+                      href={`/read/${entry.id}/${encodeURIComponent(entry.slug)}?p=${lastPage}`}
                       className="block w-full text-left focus:outline-none"
-                      aria-label={`Resume ${displayTitle} at page ${entry.lastPage}`}
+                      aria-label={
+                        savedPage > 0
+                          ? `Resume ${displayTitle} at page ${lastPage}`
+                          : `Open ${displayTitle}`
+                      }
                     >
                       <h3 className="line-clamp-2 text-sm font-semibold text-zinc-100 group-hover:text-sky-300">
                         {displayTitle}
@@ -221,8 +271,8 @@ export default function Home() {
                         </p>
                       )}
                       <p className="mt-2 text-xs text-zinc-400">
-                        Resume p.{" "}
-                        <span className="text-zinc-200">{entry.lastPage}</span>{" "}
+                        {savedPage > 0 ? "Resume" : "Start"} p.{" "}
+                        <span className="text-zinc-200">{lastPage}</span>{" "}
                         / {entry.totalPages || "?"}
                       </p>
                       <div className="mt-2 h-1 w-full overflow-hidden rounded bg-zinc-800">

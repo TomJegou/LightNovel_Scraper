@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { setProgress } from "@/lib/progress";
+
 type FlipPage = {
   index: number;
   pageNumber: string;
@@ -19,7 +21,6 @@ type FlipBook = {
   totalPageCount: number;
   pages: FlipPage[];
   libraryId: number | null;
-  lastPage: number;
 };
 
 type LibraryEntry = {
@@ -29,7 +30,6 @@ type LibraryEntry = {
   title: string | null;
   slug: string;
   totalPages: number;
-  lastPage: number;
   firstSeenAt: number;
   lastReadAt: number;
 };
@@ -208,20 +208,29 @@ export default function ReaderPage() {
   }, [goPrev, goNext, router]);
 
   // Sync ?p=N to the URL whenever currentIndex changes (replace, not push,
-  // so page flips don't pile up history entries).
+  // so page flips don't pile up history entries). We read the current
+  // `?p=` from window.location instead of depending on `searchParams`:
+  // this effect is what *causes* searchParams to change, so depending on
+  // it creates a redundant re-run (harmless thanks to the guard below,
+  // but wasteful).
   useEffect(() => {
     if (!book || !entry) return;
     const page = Number(book.pages[currentIndex]?.pageNumber);
     if (!Number.isFinite(page) || page < 1) return;
-    const currentParam = searchParams?.get("p");
+    const currentParam =
+      typeof window === "undefined"
+        ? null
+        : new URL(window.location.href).searchParams.get("p");
     if (currentParam === String(page)) return;
     router.replace(
       `/read/${entry.id}/${encodeURIComponent(entry.slug)}?p=${page}`,
       { scroll: false },
     );
-  }, [book, entry, currentIndex, router, searchParams]);
+  }, [book, entry, currentIndex, router]);
 
-  // Debounced progress PATCH.
+  // Debounced progress save to localStorage (per-client, never leaves the
+  // browser). Keyed on the library id so deep links resolve to the right
+  // entry even if the slug changed.
   useEffect(() => {
     if (!book || !book.libraryId || !currentPage) return;
     const libId = book.libraryId;
@@ -231,13 +240,7 @@ export default function ReaderPage() {
 
     const handle = window.setTimeout(() => {
       lastSentPageRef.current = page;
-      void fetch(`/api/library/${libId}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ lastPage: page }),
-      }).catch(() => {
-        // Best-effort; ignore transient failures.
-      });
+      setProgress(libId, page);
     }, PROGRESS_DEBOUNCE_MS);
 
     return () => window.clearTimeout(handle);

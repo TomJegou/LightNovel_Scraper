@@ -28,7 +28,6 @@ export async function POST(req: NextRequest) {
     // Persist metadata so the home page can show a library of previous scans.
     // Failures here must not break the scan: we catch and continue.
     let libraryId: number | null = null;
-    let lastPage = 1;
     try {
       const entry = upsertBook({
         baseUrl: book.baseUrl,
@@ -38,12 +37,11 @@ export async function POST(req: NextRequest) {
         totalPages: book.totalPageCount,
       });
       libraryId = entry.id;
-      lastPage = entry.lastPage;
     } catch (err) {
       console.error("library upsert failed:", err);
     }
 
-    return Response.json({ ...book, libraryId, lastPage });
+    return Response.json({ ...book, libraryId });
   } catch (e) {
     return Response.json(
       { error: sanitizeError(e, "Failed to fetch book metadata") },
