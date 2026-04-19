@@ -74,9 +74,57 @@ export async function fetchBookTitle(baseUrl: string): Promise<string | null> {
 }
 
 type RawPage = {
-  n?: string[];
+  /** Large image path — string or single-element array depending on export. */
+  n?: string[] | string;
   t?: string;
 };
+
+/**
+ * Some books ship `fliphtml5_pages` as an obfuscated string; others embed the
+ * page array as plain JSON right in config.js. Extract a balanced `[...]`
+ * slice (string-aware) for the latter.
+ */
+function extractPlainFliphtml5PagesJsonArray(configSrc: string): string {
+  const label = '"fliphtml5_pages":';
+  const idx = configSrc.indexOf(label);
+  if (idx === -1) {
+    throw new Error("fliphtml5_pages not found in config.js");
+  }
+  let i = idx + label.length;
+  while (i < configSrc.length && /\s/.test(configSrc[i])) i++;
+  if (configSrc[i] !== "[") {
+    throw new Error("fliphtml5_pages is not a JSON array in this config");
+  }
+  const start = i;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (; i < configSrc.length; i++) {
+    const c = configSrc[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (c === "\\") {
+        escape = true;
+      } else if (c === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "[") depth++;
+    else if (c === "]") {
+      depth--;
+      if (depth === 0) {
+        return configSrc.slice(start, i + 1);
+      }
+    }
+  }
+  throw new Error("fliphtml5_pages JSON array is truncated or malformed");
+}
 
 /**
  * Normalize a FlipHTML5 book URL into the canonical base.
@@ -155,10 +203,7 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
   const configSrc = new TextDecoder("utf-8").decode(body);
 
   const bookConfigMatch = configSrc.match(/"bookConfig":"([^"]+)"/);
-  const pagesMatch = configSrc.match(/"fliphtml5_pages":"([^"]+)"/);
-  if (!pagesMatch) {
-    throw new Error("fliphtml5_pages not found in config.js");
-  }
+  const pagesEncryptedMatch = configSrc.match(/"fliphtml5_pages":"([^"]+)"/);
 
   let totalPageCount = 0;
   if (bookConfigMatch) {
@@ -176,16 +221,28 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     }
   }
 
-  const decodedPages = await deString(pagesMatch[1]);
-  const arrEnd = decodedPages.lastIndexOf("]");
-  if (arrEnd === -1) {
-    throw new Error("Decrypted pages payload is malformed");
-  }
   let rawPages: RawPage[];
-  try {
-    rawPages = JSON.parse(decodedPages.slice(0, arrEnd + 1)) as RawPage[];
-  } catch (e) {
-    throw new Error(`Failed to parse page array: ${(e as Error).message}`);
+  if (pagesEncryptedMatch) {
+    const decodedPages = await deString(pagesEncryptedMatch[1]);
+    const arrEnd = decodedPages.lastIndexOf("]");
+    if (arrEnd === -1) {
+      throw new Error("Decrypted pages payload is malformed");
+    }
+    try {
+      rawPages = JSON.parse(decodedPages.slice(0, arrEnd + 1)) as RawPage[];
+    } catch (e) {
+      throw new Error(`Failed to parse page array: ${(e as Error).message}`);
+    }
+  } else {
+    try {
+      rawPages = JSON.parse(
+        extractPlainFliphtml5PagesJsonArray(configSrc),
+      ) as RawPage[];
+    } catch (e) {
+      throw new Error(
+        `Failed to parse plain fliphtml5_pages array: ${(e as Error).message}`,
+      );
+    }
   }
 
   if (rawPages.length === 0) {
@@ -201,7 +258,12 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
 
   const pad = Math.max(4, String(rawPages.length).length);
   const pages: FlipPage[] = rawPages.map((p, i) => {
-    const n = Array.isArray(p.n) && p.n.length > 0 ? p.n[0] : null;
+    const n =
+      typeof p.n === "string"
+        ? p.n
+        : Array.isArray(p.n) && p.n.length > 0
+          ? p.n[0] ?? null
+          : null;
     const t = typeof p.t === "string" ? p.t : null;
     if (!n) {
       throw new Error(`Missing large image for page index ${i}`);
