@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { NextRequest } from "next/server";
-import { fetchBookPages, FlipPage } from "@/lib/fliphtml5";
+import { fetchBookPages } from "@/lib/fliphtml5";
 import {
   boundedFetch,
   isAllowedUpstream,
@@ -17,12 +17,12 @@ export const maxDuration = 600;
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-async function downloadImage(page: FlipPage): Promise<Uint8Array> {
-  const url = isAllowedUpstream(page.largeUrl);
+async function downloadAsset(assetUrl: string): Promise<Uint8Array> {
+  const url = isAllowedUpstream(assetUrl);
   if (!url) {
-    throw new Error("Image URL not on allowlist");
+    throw new Error("Asset URL not on allowlist");
   }
-  const { response, body } = await boundedFetch(page.largeUrl, {
+  const { response, body } = await boundedFetch(assetUrl, {
     headers: {
       "user-agent": USER_AGENT,
       referer: `${url.protocol}//${url.host}/`,
@@ -86,13 +86,23 @@ export async function POST(req: NextRequest) {
   await runWithConcurrency(book.pages, LIMITS.downloadConcurrency, async (page) => {
     if (aborted) return;
     try {
-      const buf = await downloadImage(page);
+      const buf = await downloadAsset(page.largeUrl);
       totalBytes += buf.byteLength;
       if (totalBytes > LIMITS.totalDownloadMaxBytes) {
         aborted = true;
         throw new Error("Total download size limit reached");
       }
       zip.file(`${page.pageNumber}.webp`, buf);
+
+      if (page.overlayUrl) {
+        const svg = await downloadAsset(page.overlayUrl);
+        totalBytes += svg.byteLength;
+        if (totalBytes > LIMITS.totalDownloadMaxBytes) {
+          aborted = true;
+          throw new Error("Total download size limit reached");
+        }
+        zip.file(`${page.pageNumber}.svg`, svg);
+      }
     } catch (e) {
       failures.push(`${page.pageNumber}: ${(e as Error).message}`);
     }

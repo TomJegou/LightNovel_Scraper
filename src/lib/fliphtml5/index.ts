@@ -11,6 +11,14 @@ export type FlipPage = {
   pageNumber: string;
   largeUrl: string;
   thumbUrl: string;
+  /**
+   * Optional SVG overlay rendered on top of `largeUrl` by the FlipHTML5
+   * player (typically the text layer for text-heavy books whose webp
+   * contains only the illustration). We cache it alongside the webp and
+   * let the browser stack them in the reader so the embedded `@font-face`
+   * rules in the SVG are honored.
+   */
+  overlayUrl?: string;
 };
 
 export type FlipBook = {
@@ -74,56 +82,57 @@ export async function fetchBookTitle(baseUrl: string): Promise<string | null> {
 }
 
 type RawPage = {
-  /** Large image path — string or single-element array depending on export. */
-  n?: string[] | string;
+  n?: string[];
   t?: string;
 };
 
+type HtmlConfig = {
+  bookConfig?: string;
+  fliphtml5_pages?: string | RawPage[];
+  [key: string]: unknown;
+};
+
+type BookConfig = {
+  totalPageCount?: number | string;
+  largePath?: string | string[];
+  normalPath?: string | string[];
+  thumbPath?: string | string[];
+  [key: string]: unknown;
+};
+
 /**
- * Some books ship `fliphtml5_pages` as an obfuscated string; others embed the
- * page array as plain JSON right in config.js. Extract a balanced `[...]`
- * slice (string-aware) for the latter.
+ * Pick the directory that matches the layout of `n`:
+ * - `n` with one entry  → the first (and only) dir applies.
+ * - `n` with several entries ([webp, svg, …]) → the i-th dir.
+ * Falls back to the generic "large" dir if `normalPath` is missing/misshapen.
  */
-function extractPlainFliphtml5PagesJsonArray(configSrc: string): string {
-  const label = '"fliphtml5_pages":';
-  const idx = configSrc.indexOf(label);
-  if (idx === -1) {
-    throw new Error("fliphtml5_pages not found in config.js");
+function pickPathFor(
+  index: number,
+  normalPath: string | string[] | undefined,
+  largePath: string | string[] | undefined,
+): string | null {
+  if (Array.isArray(normalPath)) {
+    const candidate = normalPath[index] ?? normalPath[0];
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  } else if (typeof normalPath === "string" && normalPath.length > 0) {
+    return normalPath;
   }
-  let i = idx + label.length;
-  while (i < configSrc.length && /\s/.test(configSrc[i])) i++;
-  if (configSrc[i] !== "[") {
-    throw new Error("fliphtml5_pages is not a JSON array in this config");
+  if (Array.isArray(largePath)) {
+    const candidate = largePath[0];
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  } else if (typeof largePath === "string" && largePath.length > 0) {
+    return largePath;
   }
-  const start = i;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (; i < configSrc.length; i++) {
-    const c = configSrc[i];
-    if (inString) {
-      if (escape) {
-        escape = false;
-      } else if (c === "\\") {
-        escape = true;
-      } else if (c === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (c === '"') {
-      inString = true;
-      continue;
-    }
-    if (c === "[") depth++;
-    else if (c === "]") {
-      depth--;
-      if (depth === 0) {
-        return configSrc.slice(start, i + 1);
-      }
-    }
+  return null;
+}
+
+function pickThumbPath(thumbPath: string | string[] | undefined): string | null {
+  if (typeof thumbPath === "string" && thumbPath.length > 0) return thumbPath;
+  if (Array.isArray(thumbPath)) {
+    const candidate = thumbPath[0];
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
   }
-  throw new Error("fliphtml5_pages JSON array is truncated or malformed");
+  return null;
 }
 
 /**
@@ -161,16 +170,50 @@ export function normalizeBookUrl(input: string): { baseUrl: string; bookId: stri
 }
 
 /**
- * Resolves a relative FlipHTML5 asset path against the book base URL.
- * Example: "./files/large/abc.webp" + "https://host/o/b/" -> "https://host/o/b/files/large/abc.webp"
+ * Resolves a FlipHTML5 asset path against a base URL.
+ * - If `rel` already looks like a path (contains "/"), we resolve it directly
+ *   against `baseUrl` (stripping an optional "./" prefix).
+ * - Otherwise `rel` is a bare filename and we prepend `fallbackDir`
+ *   (e.g. "files/large/") from bookConfig.
  */
-function resolveAsset(rel: string, baseUrl: string): string {
+function resolveAsset(
+  rel: string,
+  baseUrl: string,
+  fallbackDir: string | null,
+): string {
   const clean = rel.replace(/^\.\//, "");
-  const resolved = new URL(clean, baseUrl).toString();
+  const hasPath = clean.includes("/");
+  const relative = hasPath
+    ? clean
+    : `${(fallbackDir ?? "").replace(/^\.\//, "").replace(/\/?$/, "/")}${clean}`;
+  const resolved = new URL(relative, baseUrl).toString();
   if (!isAllowedUpstream(resolved)) {
     throw new Error("Decrypted payload referenced a disallowed host");
   }
   return resolved;
+}
+
+function extractHtmlConfig(src: string): HtmlConfig {
+  const start = src.indexOf("{");
+  const end = src.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("config.js does not expose an htmlConfig object");
+  }
+  try {
+    return JSON.parse(src.slice(start, end + 1)) as HtmlConfig;
+  } catch (e) {
+    throw new Error(`Failed to parse htmlConfig JSON: ${(e as Error).message}`);
+  }
+}
+
+function parseTrailingJson<T>(text: string, closer: "}" | "]"): T | null {
+  const end = text.lastIndexOf(closer);
+  if (end === -1) return null;
+  try {
+    return JSON.parse(text.slice(0, end + 1)) as T;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -201,48 +244,26 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     throw new Error(`Failed to fetch config.js: HTTP ${res.status}`);
   }
   const configSrc = new TextDecoder("utf-8").decode(body);
+  const htmlConfig = extractHtmlConfig(configSrc);
 
-  const bookConfigMatch = configSrc.match(/"bookConfig":"([^"]+)"/);
-  const pagesEncryptedMatch = configSrc.match(/"fliphtml5_pages":"([^"]+)"/);
-
-  let totalPageCount = 0;
-  if (bookConfigMatch) {
-    const decoded = await deString(bookConfigMatch[1]);
-    const end = decoded.lastIndexOf("}");
-    if (end !== -1) {
-      try {
-        const obj = JSON.parse(decoded.slice(0, end + 1)) as {
-          totalPageCount?: number | string;
-        };
-        totalPageCount = Number(obj.totalPageCount ?? 0) || 0;
-      } catch {
-        /* ignore, we'll derive from pages array */
-      }
-    }
+  let bookConfig: BookConfig = {};
+  if (typeof htmlConfig.bookConfig === "string" && htmlConfig.bookConfig.length > 0) {
+    const decoded = await deString(htmlConfig.bookConfig);
+    bookConfig = parseTrailingJson<BookConfig>(decoded, "}") ?? {};
   }
 
-  let rawPages: RawPage[];
-  if (pagesEncryptedMatch) {
-    const decodedPages = await deString(pagesEncryptedMatch[1]);
-    const arrEnd = decodedPages.lastIndexOf("]");
-    if (arrEnd === -1) {
+  let rawPages: RawPage[] | null = null;
+  const fp = htmlConfig.fliphtml5_pages;
+  if (typeof fp === "string" && fp.length > 0) {
+    const decodedPages = await deString(fp);
+    rawPages = parseTrailingJson<RawPage[]>(decodedPages, "]");
+    if (!rawPages) {
       throw new Error("Decrypted pages payload is malformed");
     }
-    try {
-      rawPages = JSON.parse(decodedPages.slice(0, arrEnd + 1)) as RawPage[];
-    } catch (e) {
-      throw new Error(`Failed to parse page array: ${(e as Error).message}`);
-    }
+  } else if (Array.isArray(fp)) {
+    rawPages = fp;
   } else {
-    try {
-      rawPages = JSON.parse(
-        extractPlainFliphtml5PagesJsonArray(configSrc),
-      ) as RawPage[];
-    } catch (e) {
-      throw new Error(
-        `Failed to parse plain fliphtml5_pages array: ${(e as Error).message}`,
-      );
-    }
+    throw new Error("fliphtml5_pages not found in config.js");
   }
 
   if (rawPages.length === 0) {
@@ -254,26 +275,44 @@ export async function fetchBookPages(inputUrl: string): Promise<FlipBook> {
     );
   }
 
-  if (!totalPageCount) totalPageCount = rawPages.length;
+  const totalPageCount =
+    Number(bookConfig.totalPageCount ?? 0) || rawPages.length;
+  const thumbDir = pickThumbPath(bookConfig.thumbPath);
 
   const pad = Math.max(4, String(rawPages.length).length);
   const pages: FlipPage[] = rawPages.map((p, i) => {
-    const n =
-      typeof p.n === "string"
-        ? p.n
-        : Array.isArray(p.n) && p.n.length > 0
-          ? p.n[0] ?? null
-          : null;
+    // `n` can be a single-element array (legacy format) or a multi-element
+    // array where each entry corresponds to a different asset kind:
+    //   n[0] = webp (background illustration) — always renderable
+    //   n[1] = svg (text layer) — optional overlay composed client-side by
+    //          the official player. When present, we flatten it onto the
+    //          webp so our cache stays one file per page.
+    const nArr = Array.isArray(p.n) ? p.n : [];
+    const firstImage = typeof nArr[0] === "string" ? nArr[0] : null;
+    const overlay =
+      typeof nArr[1] === "string" && /\.svg(?:[?#]|$)/i.test(nArr[1])
+        ? nArr[1]
+        : null;
     const t = typeof p.t === "string" ? p.t : null;
-    if (!n) {
+    if (!firstImage) {
       throw new Error(`Missing large image for page index ${i}`);
     }
-    return {
+    const largeDir = pickPathFor(0, bookConfig.normalPath, bookConfig.largePath);
+    const overlayDir = overlay
+      ? pickPathFor(1, bookConfig.normalPath, bookConfig.largePath)
+      : null;
+    const page: FlipPage = {
       index: i,
       pageNumber: String(i + 1).padStart(pad, "0"),
-      largeUrl: resolveAsset(n, baseUrl),
-      thumbUrl: t ? resolveAsset(t, baseUrl) : resolveAsset(n, baseUrl),
+      largeUrl: resolveAsset(firstImage, baseUrl, largeDir),
+      thumbUrl: t
+        ? resolveAsset(t, baseUrl, thumbDir)
+        : resolveAsset(firstImage, baseUrl, largeDir),
     };
+    if (overlay) {
+      page.overlayUrl = resolveAsset(overlay, baseUrl, overlayDir);
+    }
+    return page;
   });
 
   const slug = slugify(title, bookId);

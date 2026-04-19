@@ -47,10 +47,8 @@ Emscripten-obfuscated payloads:
 
 Both are decrypted on the server by running the original `deString.js`
 WebAssembly module in an isolated Node `vm` context
-(`src/lib/fliphtml5/decoder.ts`). Some publications instead embed
-`fliphtml5_pages` as a **plain JSON array** in `config.js`; the scraper
-handles that variant without decryption. Image URLs are then resolved
-against the book's base URL and exposed through a typed API.
+(`src/lib/fliphtml5/decoder.ts`). Image URLs are then resolved against the
+book's base URL and exposed through a typed API.
 
 ```
 Home scan   ──► /api/resolve  ──► fetch <title> HTML ─► upsert book ─► id + slug

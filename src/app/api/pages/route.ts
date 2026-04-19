@@ -47,12 +47,16 @@ export async function POST(req: NextRequest) {
     let pagesCached = false;
     if (libraryId !== null && book.pages.length > 0) {
       try {
-        const { complete } = await ensureBookPagesOnDisk(libraryId, book.pages);
+        const { complete, saved, errors } = await ensureBookPagesOnDisk(
+          libraryId,
+          book.pages,
+        );
         pagesCached = complete;
         if (!complete) {
           console.warn(
-            `book-cache incomplete for libraryId=${libraryId} (${book.pages.length} pages)`,
+            `book-cache incomplete for libraryId=${libraryId}: saved=${saved}/${book.pages.length * 2} errors=${errors.length}`,
           );
+          for (const e of errors.slice(0, 5)) console.warn("  ", e);
         }
       } catch (err) {
         console.error("book-cache failed:", err);

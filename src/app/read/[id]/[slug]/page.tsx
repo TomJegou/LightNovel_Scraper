@@ -11,6 +11,12 @@ type FlipPage = {
   pageNumber: string;
   largeUrl: string;
   thumbUrl: string;
+  /**
+   * Optional SVG overlay drawn on top of `largeUrl` (e.g. the text layer
+   * for books where the webp is only the illustration). Served from the
+   * same origin as the webp so browser font/security rules apply.
+   */
+  overlayUrl?: string;
 };
 
 type FlipBook = {
@@ -39,7 +45,7 @@ type LibraryEntry = {
 const APP_NAME = "FlipHTML5 Scraper";
 const PROGRESS_DEBOUNCE_MS = 1500;
 
-type ImageKind = "large" | "thumb";
+type ImageKind = "large" | "thumb" | "overlay";
 
 function imageSrc(
   book: FlipBook | null,
@@ -166,8 +172,6 @@ export default function ReaderPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- do not depend on
-    // `searchParams` / `pParam`: that would re-fetch on every ?p=N from the reader.
   }, [id, idIsValid, router, slugParam]);
 
   // Keep currentIndex in sync with ?p= (initial load + browser back/forward).
@@ -430,19 +434,38 @@ export default function ReaderPage() {
               </span>
             </div>
           ) : (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img
+            <div
               key={currentPage.index}
-              src={imageSrc(
-                book,
-                currentPage.pageNumber,
-                currentPage.largeUrl,
-                "large",
+              className="relative inline-block max-h-[min(78dvh,calc(100dvh-12rem))] max-w-full md:max-h-[calc(100dvh-10rem)]"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={imageSrc(
+                  book,
+                  currentPage.pageNumber,
+                  currentPage.largeUrl,
+                  "large",
+                )}
+                alt={`Page ${currentPage.pageNumber}`}
+                className="block max-h-[min(78dvh,calc(100dvh-12rem))] w-auto max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
+                draggable={false}
+              />
+              {currentPage.overlayUrl && (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={imageSrc(
+                    book,
+                    currentPage.pageNumber,
+                    currentPage.overlayUrl,
+                    "overlay",
+                  )}
+                  alt=""
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 h-full w-full select-none"
+                  draggable={false}
+                />
               )}
-              alt={`Page ${currentPage.pageNumber}`}
-              className="max-h-[min(78dvh,calc(100dvh-12rem))] w-full max-w-full select-none object-contain md:max-h-[calc(100dvh-10rem)]"
-              draggable={false}
-            />
+            </div>
           )}
         </div>
       </div>

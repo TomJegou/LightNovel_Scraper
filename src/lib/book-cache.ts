@@ -16,7 +16,14 @@ const USER_AGENT =
 /** Page label as returned by FlipHTML5 (e.g. "0001"). */
 const PAGE_LABEL_RE = /^[0-9]{1,6}$/;
 
-export type CacheKind = "large" | "thumb";
+export type CacheKind = "large" | "thumb" | "overlay";
+
+/** File extension on disk for each cached asset. */
+const EXT: Record<CacheKind, string> = {
+  large: "webp",
+  thumb: "webp",
+  overlay: "svg",
+};
 
 function resolveCacheRoot(): string {
   const fromEnv = process.env.BOOK_CACHE_DIR?.trim();
@@ -37,26 +44,55 @@ function completeMarkerPath(libraryId: number): string {
 }
 
 /**
- * Marker format: plain integer = total page count when **both** `large/` and
- * `thumb/` trees are complete for that many pages.
+ * Marker format:
+ *   - legacy: plain integer = total page count (large + thumb only).
+ *   - v2:    "<totalPages>:<totalAssets>" where totalAssets counts every
+ *            expected file on disk (large + thumb + overlay for each page
+ *            that exposes one). Switching to v2 lets us detect when a book
+ *            previously cached without overlays needs to re-fetch the newly
+ *            exposed `.svg` files.
  */
-export function isCacheComplete(libraryId: number, totalPages: number): boolean {
+function parseMarker(raw: string): { pages: number; assets: number } | null {
+  const trimmed = raw.trim();
+  if (trimmed.includes(":")) {
+    const [p, a] = trimmed.split(":");
+    const pages = Number(p);
+    const assets = Number(a);
+    if (Number.isFinite(pages) && Number.isFinite(assets)) {
+      return { pages, assets };
+    }
+    return null;
+  }
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? { pages: n, assets: n * 2 } : null;
+}
+
+export function isCacheComplete(
+  libraryId: number,
+  totalPages: number,
+  expectedAssets?: number,
+): boolean {
   if (!Number.isFinite(libraryId) || libraryId <= 0 || totalPages <= 0) {
     return false;
   }
   try {
-    const raw = fs.readFileSync(completeMarkerPath(libraryId), "utf8").trim();
-    const n = Number(raw);
-    return Number.isFinite(n) && n === totalPages;
+    const raw = fs.readFileSync(completeMarkerPath(libraryId), "utf8");
+    const m = parseMarker(raw);
+    if (!m) return false;
+    if (m.pages !== totalPages) return false;
+    if (typeof expectedAssets === "number" && m.assets !== expectedAssets) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
 }
 
-async function downloadImage(urlStr: string): Promise<Uint8Array> {
+async function downloadBytes(urlStr: string): Promise<Uint8Array> {
   const url = isAllowedUpstream(urlStr);
   if (!url) {
-    throw new Error("Image URL not on allowlist");
+    throw new Error("Asset URL not on allowlist");
   }
   const { response, body } = await boundedFetch(urlStr, {
     headers: {
@@ -90,12 +126,29 @@ async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
+function fileExists(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function urlForKind(page: FlipPage, kind: CacheKind): string | null {
+  if (kind === "large") return page.largeUrl;
+  if (kind === "thumb") return page.thumbUrl;
+  return page.overlayUrl ?? null;
+}
+
+function filePathFor(libraryId: number, page: FlipPage, kind: CacheKind): string {
+  return path.join(subdir(libraryId, kind), `${page.pageNumber}.${EXT[kind]}`);
+}
+
 /**
- * Download every large and thumb `.webp` into
- * `{BOOK_CACHE_DIR}/<libraryId>/large/<page>.webp` and
- * `{BOOK_CACHE_DIR}/<libraryId>/thumb/<page>.webp`, then write `.complete`
- * only when **all** 2×N transfers succeeded. Idempotent when the marker
- * already matches `pages.length`.
+ * Download every required asset (large + thumb for every page, plus overlay
+ * SVG for pages that expose one) under `{BOOK_CACHE_DIR}/<libraryId>/<kind>/`.
+ * Writes `.complete` only when every expected asset landed on disk.
+ * Idempotent: existing files are kept so a retry only downloads what is missing.
  */
 export async function ensureBookPagesOnDisk(
   libraryId: number,
@@ -105,16 +158,21 @@ export async function ensureBookPagesOnDisk(
     return { complete: false, saved: 0, errors: ["invalid library or empty pages"] };
   }
 
-  if (isCacheComplete(libraryId, pages.length)) {
-    return { complete: true, saved: pages.length * 2, errors: [] };
+  const expected =
+    pages.length * 2 + pages.filter((p) => p.overlayUrl).length;
+
+  if (isCacheComplete(libraryId, pages.length, expected)) {
+    return { complete: true, saved: expected, errors: [] };
   }
 
-  const root = cacheDirForBook(libraryId);
-  fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(subdir(libraryId, "large"), { recursive: true });
   fs.mkdirSync(subdir(libraryId, "thumb"), { recursive: true });
+  if (pages.some((p) => p.overlayUrl)) {
+    fs.mkdirSync(subdir(libraryId, "overlay"), { recursive: true });
+  }
 
   const work: WorkUnit[] = [];
+  let alreadyOnDisk = 0;
   for (const page of pages) {
     if (!PAGE_LABEL_RE.test(page.pageNumber)) {
       return {
@@ -123,27 +181,39 @@ export async function ensureBookPagesOnDisk(
         errors: [`invalid page label: ${page.pageNumber}`],
       };
     }
-    work.push({ kind: "large", page });
-    work.push({ kind: "thumb", page });
+    const kinds: CacheKind[] = page.overlayUrl
+      ? ["large", "thumb", "overlay"]
+      : ["large", "thumb"];
+    for (const kind of kinds) {
+      if (fileExists(filePathFor(libraryId, page, kind))) {
+        alreadyOnDisk++;
+      } else {
+        work.push({ kind, page });
+      }
+    }
   }
 
   const errors: string[] = [];
-  let saved = 0;
+  let saved = alreadyOnDisk;
   let totalBytes = 0;
   let aborted = false;
 
   await runWithConcurrency(work, LIMITS.downloadConcurrency, async ({ kind, page }) => {
     if (aborted) return;
-    const urlStr = kind === "large" ? page.largeUrl : page.thumbUrl;
     const label = `${kind}:${page.pageNumber}`;
+    const url = urlForKind(page, kind);
+    if (!url) {
+      errors.push(`${label}: missing source url`);
+      return;
+    }
     try {
-      const buf = await downloadImage(urlStr);
+      const buf = await downloadBytes(url);
       totalBytes += buf.byteLength;
       if (totalBytes > LIMITS.totalDownloadMaxBytes) {
         aborted = true;
         throw new Error("Total download size limit reached");
       }
-      const filePath = path.join(subdir(libraryId, kind), `${page.pageNumber}.webp`);
+      const filePath = filePathFor(libraryId, page, kind);
       const tmp = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
       await fs.promises.writeFile(tmp, buf);
       await fs.promises.rename(tmp, filePath);
@@ -157,10 +227,13 @@ export async function ensureBookPagesOnDisk(
     return { complete: false, saved, errors };
   }
 
-  const expected = pages.length * 2;
   const complete = saved === expected && errors.length === 0;
   if (complete) {
-    await fs.promises.writeFile(completeMarkerPath(libraryId), String(pages.length), "utf8");
+    await fs.promises.writeFile(
+      completeMarkerPath(libraryId),
+      `${pages.length}:${expected}`,
+      "utf8",
+    );
   }
 
   return { complete, saved, errors };
@@ -182,9 +255,9 @@ export function readCachedPage(
   kind: CacheKind,
 ): Buffer | null {
   if (!Number.isFinite(libraryId) || libraryId <= 0) return null;
-  if (kind !== "large" && kind !== "thumb") return null;
+  if (kind !== "large" && kind !== "thumb" && kind !== "overlay") return null;
   if (!PAGE_LABEL_RE.test(pageLabel)) return null;
-  const filePath = path.join(subdir(libraryId, kind), `${pageLabel}.webp`);
+  const filePath = path.join(subdir(libraryId, kind), `${pageLabel}.${EXT[kind]}`);
   try {
     return fs.readFileSync(filePath);
   } catch {
