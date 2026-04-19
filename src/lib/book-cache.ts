@@ -67,7 +67,7 @@ function parseMarker(raw: string): { pages: number; assets: number } | null {
   return Number.isFinite(n) ? { pages: n, assets: n * 2 } : null;
 }
 
-export function isCacheComplete(
+function isCacheComplete(
   libraryId: number,
   totalPages: number,
   expectedAssets?: number,
@@ -255,7 +255,6 @@ export function readCachedPage(
   kind: CacheKind,
 ): Buffer | null {
   if (!Number.isFinite(libraryId) || libraryId <= 0) return null;
-  if (kind !== "large" && kind !== "thumb" && kind !== "overlay") return null;
   if (!PAGE_LABEL_RE.test(pageLabel)) return null;
   const filePath = path.join(subdir(libraryId, kind), `${pageLabel}.${EXT[kind]}`);
   try {

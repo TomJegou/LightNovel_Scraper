@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { setProgress } from "@/lib/progress";
 
@@ -27,7 +34,7 @@ type FlipBook = {
   totalPageCount: number;
   pages: FlipPage[];
   libraryId: number | null;
-  /** True when large + thumb for every page are on disk under BOOK_CACHE_DIR. */
+  /** True when every cached asset (large, thumb, overlay if any) is on disk. */
   pagesCached?: boolean;
 };
 
@@ -43,6 +50,8 @@ type LibraryEntry = {
 };
 
 const APP_NAME = "FlipHTML5 Scraper";
+/** Must match `title.template` in `src/app/layout.tsx` (segment is inserted for `%s`). */
+const TITLE_SUFFIX = ` — ${APP_NAME}`;
 const PROGRESS_DEBOUNCE_MS = 1500;
 
 type ImageKind = "large" | "thumb" | "overlay";
@@ -262,18 +271,23 @@ export default function ReaderPage() {
     return () => window.clearTimeout(handle);
   }, [book, currentPage]);
 
-  // Document title reflects current page for easy tab identification.
-  useEffect(() => {
-    const base = book?.title ?? entry?.title ?? entry?.bookId ?? APP_NAME;
+  // Tab title: only update once we have a label (avoid clobbering SSR metadata).
+  useLayoutEffect(() => {
+    const base = book?.title ?? entry?.title ?? entry?.bookId;
+    if (!base?.trim()) return;
+
     if (book && currentPage) {
-      document.title = `${base} · p. ${Number(currentPage.pageNumber)} / ${book.pages.length}`;
+      document.title = `${base.trim()} · p. ${Number(currentPage.pageNumber)} / ${book.pages.length}${TITLE_SUFFIX}`;
     } else {
-      document.title = `${base} · ${APP_NAME}`;
+      document.title = `${base.trim()}${TITLE_SUFFIX}`;
     }
+  }, [book, entry, currentPage]);
+
+  useEffect(() => {
     return () => {
       document.title = APP_NAME;
     };
-  }, [book, entry, currentPage]);
+  }, []);
 
   const handleDownload = useCallback(async () => {
     if (!book) return;

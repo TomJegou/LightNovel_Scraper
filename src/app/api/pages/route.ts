@@ -46,6 +46,9 @@ export async function POST(req: NextRequest) {
 
     let pagesCached = false;
     if (libraryId !== null && book.pages.length > 0) {
+      const expectedAssets =
+        book.pages.length * 2 +
+        book.pages.filter((p) => p.overlayUrl).length;
       try {
         const { complete, saved, errors } = await ensureBookPagesOnDisk(
           libraryId,
@@ -54,7 +57,7 @@ export async function POST(req: NextRequest) {
         pagesCached = complete;
         if (!complete) {
           console.warn(
-            `book-cache incomplete for libraryId=${libraryId}: saved=${saved}/${book.pages.length * 2} errors=${errors.length}`,
+            `book-cache incomplete for libraryId=${libraryId}: saved=${saved}/${expectedAssets} errors=${errors.length}`,
           );
           for (const e of errors.slice(0, 5)) console.warn("  ", e);
         }

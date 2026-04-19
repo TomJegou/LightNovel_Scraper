@@ -8,7 +8,10 @@ const font = Montserrat({
 });
 
 export const metadata: Metadata = {
-  title: "FlipHTML5 Scraper",
+  title: {
+    default: "FlipHTML5 Scraper",
+    template: "%s — FlipHTML5 Scraper",
+  },
   description: "Extract FlipHTML5 books as numbered .webp image sets.",
 };
 
