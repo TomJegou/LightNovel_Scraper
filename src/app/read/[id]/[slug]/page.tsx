@@ -154,7 +154,10 @@ export default function ReaderPage() {
         const pagesRes = await fetch("/api/pages", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ url: libEntry.baseUrl }),
+          body: JSON.stringify({
+            url: libEntry.baseUrl,
+            libraryId: libEntry.id,
+          }),
         });
         if (cancelled) return;
         const pagesPayload = (await pagesRes.json()) as

@@ -3,7 +3,7 @@ import "server-only";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { FlipPage } from "@/lib/fliphtml5";
+import type { FlipBook, FlipPage } from "@/lib/fliphtml5";
 import {
   boundedFetch,
   isAllowedUpstream,
@@ -132,6 +132,103 @@ function fileExists(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Page labels (e.g. "0001") from `large/*.webp`, sorted by numeric order.
+ */
+function listSortedPageLabelsFromLargeDir(libraryId: number): string[] | null {
+  const dir = subdir(libraryId, "large");
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const labels: string[] = [];
+  for (const name of entries) {
+    if (!name.toLowerCase().endsWith(".webp")) continue;
+    const label = name.slice(0, -".webp".length);
+    if (!PAGE_LABEL_RE.test(label)) continue;
+    labels.push(label);
+  }
+  if (labels.length === 0) return null;
+  labels.sort((a, b) => Number(a) - Number(b));
+  return labels;
+}
+
+/**
+ * Reconstruct a `FlipBook` from disk when `.complete` matches and every
+ * expected `large/` + `thumb/` file exists. Used when FlipHTML5 is down but
+ * the reader still has a full local mirror.
+ */
+export function tryFlipBookFromDiskCache(
+  libraryId: number,
+  meta: {
+    baseUrl: string;
+    bookId: string;
+    title: string | null;
+    slug: string;
+  },
+): FlipBook | null {
+  let markerRaw: string;
+  try {
+    markerRaw = fs.readFileSync(completeMarkerPath(libraryId), "utf8");
+  } catch {
+    return null;
+  }
+  const m = parseMarker(markerRaw);
+  if (!m || m.pages <= 0 || m.pages > LIMITS.maxPages) return null;
+
+  const labels = listSortedPageLabelsFromLargeDir(libraryId);
+  if (!labels || labels.length !== m.pages) return null;
+
+  const expectedOverlays = Math.max(0, m.assets - m.pages * 2);
+  let overlayFileCount = 0;
+  try {
+    overlayFileCount = fs
+      .readdirSync(subdir(libraryId, "overlay"))
+      .filter((n) => n.toLowerCase().endsWith(".svg")).length;
+  } catch {
+    overlayFileCount = 0;
+  }
+  if (expectedOverlays > 0 && overlayFileCount !== expectedOverlays) {
+    return null;
+  }
+
+  const base = meta.baseUrl.endsWith("/") ? meta.baseUrl : `${meta.baseUrl}/`;
+
+  const pages: FlipPage[] = [];
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    if (label === undefined) return null;
+    const largeDisk = path.join(subdir(libraryId, "large"), `${label}.webp`);
+    const thumbDisk = path.join(subdir(libraryId, "thumb"), `${label}.webp`);
+    if (!fileExists(largeDisk) || !fileExists(thumbDisk)) return null;
+
+    const largeUrl = new URL(`files/large/${label}.webp`, base).toString();
+    const thumbUrl = new URL(`files/thumb/${label}.webp`, base).toString();
+    const page: FlipPage = {
+      index: i,
+      pageNumber: label,
+      largeUrl,
+      thumbUrl,
+    };
+    const overlayDisk = path.join(subdir(libraryId, "overlay"), `${label}.svg`);
+    if (fileExists(overlayDisk)) {
+      page.overlayUrl = new URL(`files/overlay/${label}.svg`, base).toString();
+    }
+    pages.push(page);
+  }
+
+  return {
+    baseUrl: meta.baseUrl,
+    bookId: meta.bookId,
+    title: meta.title,
+    slug: meta.slug,
+    totalPageCount: m.pages,
+    pages,
+  };
 }
 
 function urlForKind(page: FlipPage, kind: CacheKind): string | null {

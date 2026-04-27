@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { ensureBookPagesOnDisk } from "@/lib/book-cache";
-import { fetchBookPages } from "@/lib/fliphtml5";
-import { upsertBook } from "@/lib/library";
+import { ensureBookPagesOnDisk, tryFlipBookFromDiskCache } from "@/lib/book-cache";
+import { fetchBookPages, normalizeBookUrl } from "@/lib/fliphtml5";
+import { getBook, upsertBook } from "@/lib/library";
 import { rateLimit, sanitizeError, tooManyRequests } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -13,9 +13,9 @@ export async function POST(req: NextRequest) {
   const rl = rateLimit(req, "pages", 20, 60_000);
   if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
 
-  let body: { url?: string };
+  let body: { url?: string; libraryId?: number };
   try {
-    body = (await req.json()) as { url?: string };
+    body = (await req.json()) as { url?: string; libraryId?: number };
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -68,6 +68,37 @@ export async function POST(req: NextRequest) {
 
     return Response.json({ ...book, libraryId, pagesCached });
   } catch (e) {
+    const requestedId =
+      typeof body.libraryId === "number" &&
+      Number.isInteger(body.libraryId) &&
+      body.libraryId > 0
+        ? body.libraryId
+        : null;
+    if (requestedId !== null) {
+      try {
+        const entry = getBook(requestedId);
+        if (entry) {
+          const { baseUrl: normalized } = normalizeBookUrl(url);
+          if (entry.baseUrl === normalized) {
+            const fromDisk = tryFlipBookFromDiskCache(requestedId, {
+              baseUrl: entry.baseUrl,
+              bookId: entry.bookId,
+              title: entry.title,
+              slug: entry.slug,
+            });
+            if (fromDisk) {
+              return Response.json({
+                ...fromDisk,
+                libraryId: requestedId,
+                pagesCached: true,
+              });
+            }
+          }
+        }
+      } catch {
+        // Invalid URL shape or other fallback guard failures — surface original error.
+      }
+    }
     return Response.json(
       { error: sanitizeError(e, "Failed to fetch book metadata") },
       { status: 400 },
